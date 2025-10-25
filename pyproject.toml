@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+
+[project]
+name = "ga-svm-project"
+version = "0.1.0"
+description = "Genetic algorithm for opposing evolution of train/val sets for SVM"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "pyyaml",
+    "matplotlib",
+    "click",
+    "joblib",
+]
+
+[tool.black]
+line-length = 100

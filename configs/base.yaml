@@ -1,0 +1,35 @@
+seed: 42
+experiment_name: "baseline_ga_svm"
+data:
+  train_csv: "data/raw/train.csv"
+  validation_csv: "data/raw/validation.csv"
+  test_csv: "data/raw/test.csv"  # optional
+  target: "label"
+  stratify: true
+
+svm:
+  kernel: "rbf"        # rbf|linear|poly|sigmoid
+  C: 1.0
+  gamma: "scale"
+  class_weight: "balanced"
+
+ga:
+  population_size: 50
+  generations: 50
+  elitism: 2
+  tournament_k: 3
+  crossover_prob: 0.8
+  mutation_prob: 0.2
+  val_fraction: 0.2           # fraction of data used for validation in a chromosome
+  constraints:
+    min_class_fraction: 0.05  # each class must have at least this fraction in train/val
+  early_stopping:
+    patience: 7
+    min_delta: 1e-4
+
+fitness:
+  metric: "roc_auc"           # roc_auc|f1|balanced_accuracy|pr_auc
+  penalties:
+    val_size_penalty: 0.0
+    class_imbalance_penalty: 0.5
+    sv_ratio_penalty: 0.5     # penalty for too high/low % of support vectors
