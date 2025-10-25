@@ -3,9 +3,10 @@ experiment_name: "baseline_ga_svm"
 data:
   train_csv: "data/raw/train.csv"
   validation_csv: "data/raw/validation.csv"
-  test_csv: "data/raw/test.csv"  # optional
-  target: "label"
+  target: "label"             # <- zmień jeśli trzeba
   stratify: true
+  header: null                # true|false|null(auto)
+  target_candidates: ["target","y","class"]
 
 svm:
   kernel: "rbf"        # rbf|linear|poly|sigmoid
