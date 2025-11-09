@@ -19,11 +19,11 @@ encoding:
 
 fitness:
   metric: "balanced_accuracy"     # acc|balanced_accuracy|f1_macro|...
-  class_imbalance_penalty: 0.2    # 0.0 wyłącza karę
+  class_imbalance_penalty: 0.0    # 0.0 wyłącza karę
 
 ga:
-  population_size: 60
-  generations: 50
+  population_size: 100
+  generations: 10
   tournament_k: 3
   crossover_rate: 0.8
   mutation_rate: 0.05

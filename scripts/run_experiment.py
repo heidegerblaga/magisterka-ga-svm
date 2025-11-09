@@ -5,7 +5,7 @@ import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from ga.utils.random import set_global_seed
+from ga.utils.random import set_global_seed,limit_dataset
 from ga.utils.io import ensure_dirs
 from ga.utils.logger import get_logger
 from ga.data.loader import prepare_train_val
@@ -13,8 +13,7 @@ from ga.models.svm import SVMConfig, train_eval_svm
 from ga.encoding import EncodingConfig
 from ga.fitness import FitnessConfig
 from ga.loop.engine import GAConfig, run_ga
-
-
+from ga.utils.artifacts import save_ga_artifacts
 
 
 @click.command()
@@ -36,12 +35,15 @@ def main(config):
         target_candidates=cfg["data"].get("target_candidates", []),
     )
 
+    X_train,y_train,X_val,y_val = limit_dataset(X_train,X_val,y_train,y_val)
+
     svm_cfg = SVMConfig(
         kernel=cfg["svm"]["kernel"],
         C=cfg["svm"]["C"],
         gamma=cfg["svm"]["gamma"],
         class_weight=cfg["svm"]["class_weight"],
     )
+
     score = train_eval_svm(X_train, y_train, X_val, y_val, svm_cfg, metric=cfg["fitness"]["metric"])
     log.info(f"Baseline SVM ({svm_cfg.kernel}) {cfg['fitness']['metric']}: {score:.4f}")
 
@@ -55,7 +57,7 @@ def main(config):
     )
     gcfg = GAConfig(
         population_size=cfg.get("ga", {}).get("population_size", 60),
-        generations=cfg.get("ga", {}).get("generations", 50),
+        generations=cfg.get("ga", {}).get("generations", 20),
         tournament_k=cfg.get("ga", {}).get("tournament_k", 3),
         crossover_rate=cfg.get("ga", {}).get("crossover_rate", 0.8),
         mutation_rate=cfg.get("ga", {}).get("mutation_rate", 0.05),
@@ -69,6 +71,16 @@ def main(config):
     # uruchom GA
     history, best_mask = run_ga(
         X_train, y_train, enc_cfg=enc_cfg, svm_cfg=svm_cfg, fcfg=fcfg, gcfg=gcfg, seed=cfg.get("seed", 42)
+    )
+
+    save_ga_artifacts(
+        history=history,
+        best_mask=best_mask,
+        X=X_train,
+        y=y_train,
+        svm_cfg=svm_cfg,
+        metric=cfg["fitness"]["metric"],
+        log=log,
     )
 
     log.info("Project scaffold OK. Implement GA loop in src/ga/...")
