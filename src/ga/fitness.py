@@ -29,3 +29,38 @@ def evaluate_individual(mask, X, y, svm_cfg: SVMConfig, fcfg: FitnessConfig) -> 
     penalty += fcfg.class_imbalance_penalty * _class_balance_penalty(y_tr, y_va)
     # val_size_penalty można dodać: penalizuj zbyt małe/duże walidacje względem cfg.val_fraction
     return max(0.0, base * (1.0 - penalty))
+
+
+from dataclasses import dataclass
+import numpy as np
+from ga.models.svm import SVMConfig, train_eval_svm
+
+
+def evaluate_individual_fixed_train(
+    train_mask: np.ndarray,
+    X_pool: np.ndarray, y_pool: np.ndarray,
+    X_val: np.ndarray,  y_val: np.ndarray,
+    svm_cfg: SVMConfig, fcfg: FitnessConfig
+) -> float:
+    """
+    Ocena osobnika: TRAIN = X_pool[train_mask], VAL = stałe (X_val, y_val).
+    """
+    X_tr = X_pool[train_mask]
+    y_tr = y_pool[train_mask]
+    if len(np.unique(y_tr)) < 2 or len(np.unique(y_val)) < 2:
+        return 0.0
+
+    base = train_eval_svm(X_tr, y_tr, X_val, y_val, svm_cfg, metric=fcfg.metric)
+
+    if fcfg.class_imbalance_penalty > 0.0:
+        def imb(y):
+            y = np.asarray(y)
+            # bezpieczne liczenie częstości
+            classes, counts = np.unique(y, return_counts=True)
+            p = counts / counts.sum()
+            return 1.0 - p.min()
+        penalty = fcfg.class_imbalance_penalty * imb(y_tr)
+        base = max(0.0, base * (1.0 - penalty))
+
+    return float(base)
+

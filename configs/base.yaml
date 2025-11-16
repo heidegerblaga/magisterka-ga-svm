@@ -3,6 +3,7 @@ experiment_name: "baseline_ga_svm"
 data:
   train_csv: "data/raw/train.csv"
   validation_csv: "data/raw/validation.csv"
+  test_csv: "data/raw/test.csv"
   target: "label"             # <- zmień jeśli trzeba
   stratify: true
   header: null                # true|false|null(auto)
@@ -15,19 +16,34 @@ svm:
   class_weight: "balanced"
 
 encoding:
-  val_fraction: 0.2   # udział walidacji
+  k_per_class: 50   # dostosuj do danych
 
 fitness:
-  metric: "balanced_accuracy"     # acc|balanced_accuracy|f1_macro|...
-  class_imbalance_penalty: 0.0    # 0.0 wyłącza karę
+  metric: balanced_accuracy
+  class_imbalance_penalty: 0.2
 
 ga:
-  population_size: 100
-  generations: 10
+  population_size: 40
+  generations: 20
   tournament_k: 3
   crossover_rate: 0.8
   mutation_rate: 0.05
   elitism: 2
   early_stopping:
-    patience: 10
+    patience: 5
     min_delta: 0.001
+
+val_ga:
+  subset_fraction: 0.5        # np. GA szuka najgorszej połowy walidacji
+  population_size: 40
+  generations: 20
+  tournament_k: 3
+  crossover_rate: 0.8
+  mutation_rate: 0.05
+  elitism: 2
+  early_stopping:
+    patience: 5
+    min_delta: 0.001
+
+
+
