@@ -45,5 +45,8 @@ val_ga:
     patience: 5
     min_delta: 0.001
 
-
+k_schedule:
+  num_cycles: 3       # ile razy przechodzimy TRAIN -> VAL -> TRAIN -> ...
+  k_start: 20         # początkowe k na klasę
+  k_multiplier: 1.5   # przy przejściu VAL -> TRAIN: k := round(k * 1.5)
 

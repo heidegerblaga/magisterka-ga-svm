@@ -381,7 +381,16 @@ def run_val_ga(
         history.append(gen_best)
 
         # log z pokolenia (opcjonalnie zostawione)
-        print(f"[VAL-GA GEN {gen+1:03d}/{gcfg.generations}] best_adv_fitness={gen_best:.4f}, global_best={best_score:.4f}")
+        # statystyki populacji (raport stabilności)
+        gen_mean = float(scores.mean())
+        gen_worst = float(scores.min())
+        gen_var = float(scores.var())
+
+        print(
+            f"[VAL-GA GEN {gen + 1:03d}/{gcfg.generations}] "
+            f"best={gen_best:.4f}, mean={gen_mean:.4f}, worst={gen_worst:.4f}, var={gen_var:.6f}, "
+            f"global_best={best_score:.4f}"
+        )
 
         if gen_best > best_score + gcfg.early_stopping.min_delta:
             best_score = gen_best
