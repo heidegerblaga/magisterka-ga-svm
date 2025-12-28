@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/skyri/Desktop/magisterka/ga_svm_project_scaffold/mlruns/335088491250690910/cc6846ab59d64ac1961977d5155649a7/artifacts
+end_time: 1764094098697
+entry_point_name: ''
+experiment_id: '335088491250690910'
+lifecycle_stage: active
+run_id: cc6846ab59d64ac1961977d5155649a7
+run_name: baseline_ga_svm
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1764094076836
+status: 3
+tags: []
+user_id: skyri

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Tuple
 import numpy as np
+import pandas as pd
 
 from ga.encoding import EncodingConfig, init_individual, decode
 from ga.models.svm import SVMConfig
@@ -21,6 +22,7 @@ from ga.encoding import (
 )
 from ga.fitness import FitnessConfig, evaluate_individual_fixed_train
 from ga.models.svm import SVMConfig
+import mlflow
 
 # --- Konfiguracje ---
 
@@ -192,6 +194,26 @@ def run_ga_k_per_class(
     # inicjalizacja populacji
     pop = np.stack([init_k_per_class(y_pool, kcfg) for _ in range(gcfg.population_size)], axis=0)
     scores = _evaluate_population_k(pop, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg)
+    from ga.diversity import (DiversityConfig,
+                              precompute_dist_matrix,
+                              diversity_score)
+
+    # precompute raz na start (zrób to u góry tylko raz)
+    dist_matrix = precompute_dist_matrix(X_pool)
+
+    div_cfg = DiversityConfig(weight=0.3)
+
+    div_scores = np.array([
+        diversity_score(pop[i], X_pool, y_pool, dist_matrix, div_cfg)
+        for i in range(pop.shape[0])
+    ])
+
+    if np.any(div_scores > 0):
+        div_norm = (div_scores - div_scores.min()) / (div_scores.max() - div_scores.min() + 1e-12)
+    else:
+        div_norm = np.zeros_like(div_scores)
+
+    effective_scores = scores + div_cfg.weight * div_norm
 
     best_idx = int(np.argmax(scores))
     best_score = float(scores[best_idx])
@@ -209,8 +231,8 @@ def run_ga_k_per_class(
 
         # reprodukcja
         while len(new_pop) < gcfg.population_size:
-            p1 = pop[_tournament_select(scores, gcfg.tournament_k, rng)]
-            p2 = pop[_tournament_select(scores, gcfg.tournament_k, rng)]
+            p1 = pop[_tournament_select(effective_scores, gcfg.tournament_k, rng)]
+            p2 = pop[_tournament_select(effective_scores, gcfg.tournament_k, rng)]
 
             # krzyżowanie + naprawa k-per-class
             if rng.random() < gcfg.crossover_rate:
@@ -326,17 +348,56 @@ def run_val_ga(
     """
     Drugi GA (Val-GA): szuka podzbioru walidacji, który MAKSYMALNIE PSUJE wynik ustalonego SVM.
 
-    Zwraca:
-      - history_adv: najlepszy (najbardziej szkodliwy) fitness w każdej generacji
-      - best_val_mask: maska bool nad X_val/y_val (True => wchodzi do adwersarialnej walidacji)
+    Z cachingiem predykcji:
+      - clf.predict(X_val) wykonuje się TYLKO RAZ
+      - potem GA tylko indeksuje predykcje
     """
+    from ga.models.svm import eval_from_predictions
+    from ga.profiling import get_profile
+
+    # wymuszamy numpy, bo selekcja GA indeksuje po NumPy
+    if isinstance(y_val, pd.Series):
+        y_val = y_val.to_numpy()
+
+    if isinstance(X_val, pd.DataFrame):
+        X_val = X_val.to_numpy()
+
     rng = np.random.default_rng(seed)
     n = X_val.shape[0]
     n_sel = max(1, int(round(vcfg.subset_fraction * n)))
 
-    # inicjalna populacja masek walidacji
+    # ============================================================
+    # 1. CACHE PREDYKCJI
+    # ============================================================
+    full_pred = clf.predict(X_val)
+
+    # opcjonalnie profilowanie kosztu – jedyne realne wywołanie SVM
+    profile = get_profile()
+    if profile is not None:
+        profile.n_fixed_eval += 1
+        profile.val_points_evaluated += X_val.shape[0]
+
+    # ============================================================
+    # 2. LOKALNA FUNKCJA EWALUACJI OSOBNIKA (SZYBKA)
+    # ============================================================
+    def eval_individual(mask: np.ndarray) -> float:
+        idx = np.flatnonzero(mask)
+        if idx.size == 0:
+            return 0.0
+        return eval_from_predictions(
+            y_true=y_val[idx],
+            y_pred=full_pred[idx],
+            metric=metric,
+        )
+
+    def evaluate_population(pop: np.ndarray) -> np.ndarray:
+        return np.array([eval_individual(pop[i]) for i in range(pop.shape[0])], dtype=float)
+
+    # ============================================================
+    # 3. INICJALIZACJA POPULACJI
+    # ============================================================
     pop = np.stack([_init_val_mask(n, vcfg, rng) for _ in range(gcfg.population_size)], axis=0)
-    scores = _evaluate_population_val(pop, X_val, y_val, clf, metric)
+    scores = evaluate_population(pop)
 
     best_idx = int(np.argmax(scores))
     best_score = float(scores[best_idx])
@@ -344,20 +405,27 @@ def run_val_ga(
     history = [best_score]
     no_improve = 0
 
+    # ============================================================
+    # 4. PĘTLA GA
+    # ============================================================
     for gen in range(gcfg.generations):
         new_pop = []
 
-        # elityzm
+        # ======================================================
+        # --- ELITYZM ---
+        # ======================================================
         elite_idx = np.argsort(scores)[-gcfg.elitism:]
         for ei in elite_idx:
             new_pop.append(pop[int(ei)].copy())
 
-        # reprodukcja
+        # ======================================================
+        # --- REPRODUKCJA ---
+        # ======================================================
         while len(new_pop) < gcfg.population_size:
             p1 = pop[_tournament_select(scores, gcfg.tournament_k, rng)]
             p2 = pop[_tournament_select(scores, gcfg.tournament_k, rng)]
 
-            # krzyżowanie
+            # --- krzyżowanie ---
             if rng.random() < gcfg.crossover_rate:
                 c1, c2 = _uniform_crossover(p1, p2, rng)
                 c1 = _repair_val_mask(c1, n_sel, rng)
@@ -365,7 +433,7 @@ def run_val_ga(
             else:
                 c1, c2 = p1.copy(), p2.copy()
 
-            # mutacja + naprawa
+            # --- mutacja ---
             c1 = _mutate_mask(c1, gcfg.mutation_rate, rng)
             c1 = _repair_val_mask(c1, n_sel, rng)
 
@@ -374,24 +442,40 @@ def run_val_ga(
 
             new_pop.extend([c1, c2])
 
+        # ======================================================
+        # --- AKTUALIZACJA POPULACJI ---
+        # ======================================================
         pop = np.stack(new_pop[:gcfg.population_size], axis=0)
-        scores = _evaluate_population_val(pop, X_val, y_val, clf, metric)
+        scores = evaluate_population(pop)
 
+        # ======================================================
+        # --- STATYSTYKI POKOLENIA ---
+        # ======================================================
         gen_best = float(scores.max())
-        history.append(gen_best)
-
-        # log z pokolenia (opcjonalnie zostawione)
-        # statystyki populacji (raport stabilności)
         gen_mean = float(scores.mean())
         gen_worst = float(scores.min())
         gen_var = float(scores.var())
 
+        history.append(gen_best)
+
+        # MLflow — jasne nazwy, bez konfliktów z train-GA
+        mlflow.log_metric("val_ga.best_gen", gen_best, step=gen)
+        mlflow.log_metric("val_ga.mean_gen", gen_mean, step=gen)
+        mlflow.log_metric("val_ga.worst_gen", gen_worst, step=gen)
+        mlflow.log_metric("val_ga.var_gen", gen_var, step=gen)
+        mlflow.log_metric("val_ga.global_best", best_score, step=gen)
+
+        # konsolowy raport (czytelny)
         print(
             f"[VAL-GA GEN {gen + 1:03d}/{gcfg.generations}] "
-            f"best={gen_best:.4f}, mean={gen_mean:.4f}, worst={gen_worst:.4f}, var={gen_var:.6f}, "
+            f"best_gen={gen_best:.4f}, mean={gen_mean:.4f}, "
+            f"worst={gen_worst:.4f}, var={gen_var:.6f}, "
             f"global_best={best_score:.4f}"
         )
 
+        # ======================================================
+        # --- AKTUALIZACJA GLOBALNEGO NAJLEPSZEGO ---
+        # ======================================================
         if gen_best > best_score + gcfg.early_stopping.min_delta:
             best_score = gen_best
             best_mask = pop[int(np.argmax(scores))].copy()

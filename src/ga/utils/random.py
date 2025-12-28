@@ -5,7 +5,7 @@ def set_global_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
 
-def limit_dataset(X_train,X_val,y_train,y_val,max_rows=1000 ):
+def limit_dataset(X_train,X_val,y_train,y_val,max_rows=10000 ):
     # --- ograniczenie datasetu do 1000 próbek dla testów ---
 
         n_train = min(len(X_train), max_rows // 2)

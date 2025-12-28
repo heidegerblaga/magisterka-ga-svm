@@ -29,6 +29,31 @@ from ga.loop.engine import (
     run_val_ga,
 )
 
+from ga.profiling import get_profile
+import mlflow
+
+mlflow.set_tracking_uri("file:///C:/Users/skyri/Desktop/magisterka/ga_svm_project_scaffold/mlruns")
+mlflow.set_experiment("ga_svm_magisterka")
+
+
+def _log_svm_profile(log):
+    profile = get_profile()
+
+    # do MLflow
+    mlflow.log_metric("svm.n_train_eval", profile.n_train_eval)
+    mlflow.log_metric("svm.n_fixed_eval", profile.n_fixed_eval)
+    mlflow.log_metric("svm.val_points_evaluated", profile.val_points_evaluated)
+    mlflow.log_metric("svm.approx_cost", profile.approx_cost)
+
+    # do loggera konsolowego
+    log.info(
+        "SVM cost profile: "
+        f"train_eval={profile.n_train_eval}, "
+        f"fixed_eval={profile.n_fixed_eval}, "
+        f"val_points_evaluated={profile.val_points_evaluated}, "
+        f"approx_cost={profile.approx_cost}"
+    )
+
 
 # =====================================================================
 # 1) ŁADOWANIE DANYCH
@@ -90,6 +115,15 @@ def run_baseline_phase(X_train, y_train, X_val, y_val, X_test, y_test, svm_cfg, 
         metric=metric,
         return_dict=True,
     )
+
+    metrics = res_val["all"]
+    mlflow.log_metric("baseline.fit_metric", res_val["metric"])
+    mlflow.log_metric("baseline.fit_time", res_val["fit_time"])
+    mlflow.log_metric("baseline.score_time", res_val["score_time"])
+
+    for name, val in metrics.items():
+        mlflow.log_metric(f"baseline.{name}", val)
+
     log.info(
         f"Baseline SVM ({svm_cfg.kernel}) VAL {metric}: {res_val['metric']:.4f} | "
         f"all={res_val['all']} | fit={res_val['fit_time']:.3f}s, score={res_val['score_time']:.3f}s"
@@ -337,44 +371,103 @@ def run_train_val_cycles(
 # =====================================================================
 # 4) GŁÓWNA FUNKCJA – TERAZ BARDZO CIENKA
 # =====================================================================
+def _flatten_dict(d, parent_key="", sep="."):
+    items = {}
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.update(_flatten_dict(v, new_key, sep=sep))
+        else:
+            items[new_key] = v
+    return items
+
+
+def _log_config_to_mlflow(cfg: dict, config_path: str):
+    flat = _flatten_dict(cfg)
+    for k, v in flat.items():
+        try:
+            mlflow.log_param(k, v)
+        except Exception:
+            pass  # wartości złożone/logów nie logujemy jako param
+
+    # log sam YAML jako artefakt
+    mlflow.log_artifact(config_path, artifact_path="config")
+
 
 @click.command()
 @click.option("--config", "-c", type=click.Path(exists=True), required=True)
 def main(config):
     cfg = yaml.safe_load(Path(config).read_text(encoding="utf-8"))
+    experiment_name = cfg.get("experiment_name", Path(config).stem)
 
-    set_global_seed(cfg.get("seed", 42))
-    log = get_logger()
-    log.info(f"Loaded config: {cfg.get('experiment_name', 'exp')}")
+    # ----------------------------------------------------------------------
+    # START MLflow
+    # ----------------------------------------------------------------------
+    mlflow.set_experiment("ga_svm_magisterka")
 
-    ensure_dirs(["artifacts/checkpoints", "artifacts/metrics", "artifacts/plots"])
+    with mlflow.start_run():
+        # log config YAML + flatten paramów
+        _log_config_to_mlflow(cfg, config)
 
-    # 1) dane
-    X_train, y_train, X_val_full, y_val_full, X_test, y_test = load_datasets(cfg, log)
+        set_global_seed(cfg.get("seed", 42))
+        log = get_logger()
+        log.info(f"Loaded config: {cfg.get('experiment_name', 'exp')}")
 
-    # 2) konfiguracja SVM
-    svm_cfg = SVMConfig(
-        kernel=cfg["svm"]["kernel"],
-        C=cfg["svm"]["C"],
-        gamma=cfg["svm"]["gamma"],
-        class_weight=cfg["svm"]["class_weight"],
-    )
+        ensure_dirs(["artifacts/checkpoints", "artifacts/metrics", "artifacts/plots"])
 
-    # 3) baseline
-    run_baseline_phase(X_train, y_train, X_val_full, y_val_full, X_test, y_test, svm_cfg, cfg, log)
+        # ------------------------------------------------------------------
+        # 1) dane
+        # ------------------------------------------------------------------
+        X_train, y_train, X_val_full, y_val_full, X_test, y_test = load_datasets(cfg, log)
 
-    # 4) cykle TRAIN-GA + VAL-GA + harmonogram k + kumulacja walidacji
-    run_train_val_cycles(
-        X_train=X_train,
-        y_train=y_train,
-        X_val_full=X_val_full,
-        y_val_full=y_val_full,
-        X_test=X_test,
-        y_test=y_test,
-        svm_cfg=svm_cfg,
-        cfg=cfg,
-        log=log,
-    )
+        # ------------------------------------------------------------------
+        # 2) konfiguracja SVM
+        # ------------------------------------------------------------------
+        svm_cfg = SVMConfig(
+            kernel=cfg["svm"]["kernel"],
+            C=cfg["svm"]["C"],
+            gamma=cfg["svm"]["gamma"],
+            class_weight=cfg["svm"]["class_weight"],
+        )
+
+        # ------------------------------------------------------------------
+        # 3) baseline
+        # ------------------------------------------------------------------
+        baseline_res = run_baseline_phase(
+            X_train, y_train,
+            X_val_full, y_val_full,
+            X_test, y_test,
+            svm_cfg, cfg, log
+        )
+
+        # baseline jako metryki MLflow
+        if isinstance(baseline_res, dict):
+            mlflow.log_metric("baseline.metric", baseline_res["metric"])
+            mlflow.log_metric("baseline.fit_time", baseline_res["fit_time"])
+            mlflow.log_metric("baseline.score_time", baseline_res["score_time"])
+            for k, v in baseline_res["all"].items():
+                mlflow.log_metric(f"baseline.{k}", float(v))
+
+        # ------------------------------------------------------------------
+        # 4) cykle TRAIN-GA + VAL-GA
+        # ------------------------------------------------------------------
+        run_train_val_cycles(
+            X_train=X_train,
+            y_train=y_train,
+            X_val_full=X_val_full,
+            y_val_full=y_val_full,
+            X_test=X_test,
+            y_test=y_test,
+            svm_cfg=svm_cfg,
+            cfg=cfg,
+            log=log,
+        )
+
+        # ------------------------------------------------------------------
+        # 5) profil kosztu
+        # ------------------------------------------------------------------
+
+        _log_svm_profile(log)
 
 
 if __name__ == "__main__":

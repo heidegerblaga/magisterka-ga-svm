@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/skyri/Desktop/magisterka/ga_svm_project_scaffold/mlruns/335088491250690910/d0b2892e67594a21b5e33a167c766423/artifacts
+end_time: null
+entry_point_name: ''
+experiment_id: '335088491250690910'
+lifecycle_stage: active
+run_id: d0b2892e67594a21b5e33a167c766423
+run_name: funny-hog-23
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1764096583853
+status: 1
+tags: []
+user_id: skyri

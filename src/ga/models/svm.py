@@ -4,6 +4,8 @@ from sklearn.metrics import (
     roc_auc_score, f1_score, balanced_accuracy_score,
     average_precision_score, accuracy_score
 )
+from ga.profiling import get_profile
+
 import numpy as np
 import time
 
@@ -17,34 +19,40 @@ class SVMConfig:
 
 
 def train_eval_svm(
-    X_train, y_train, X_val, y_val,
+    X_train, y_train,
+    X_val,   y_val,
     cfg: SVMConfig,
-    metric: str = "roc_auc",
-    return_dict: bool = False
+    metric: str = "balanced_accuracy",
+    return_dict: bool = False,
 ):
-    """Trenuje i ewaluje SVM, zwracając:
-       - jedną metrykę (default)
-       - lub pełne metryki + czasy jeśli return_dict=True
     """
+    Trenuje SVM i ewaluuję na walidacji.
+    Jeśli return_dict=True -> zwraca słownik z metrykami i czasami,
+    inaczej zwraca tylko jedną wybraną metrykę.
+    """
+    profile = get_profile()
 
+    # --- trening ---
+    t0 = time.perf_counter()
     clf = SVC(
         kernel=cfg.kernel,
         C=cfg.C,
         gamma=cfg.gamma,
         class_weight=cfg.class_weight,
         probability=cfg.probability,
-        random_state=0,
     )
-
-    # --- czas trenowania ---
-    t0 = time.perf_counter()
     clf.fit(X_train, y_train)
     fit_time = time.perf_counter() - t0
 
-    # --- czas predykcji ---
+    # --- ewaluacja ---
     t1 = time.perf_counter()
     pred = clf.predict(X_val)
     score_time = time.perf_counter() - t1
+
+    # >>>>>> PROFILOWANIE <<<<<<
+    if profile is not None:
+        profile.n_train_eval += 1
+        profile.val_points_evaluated += X_val.shape[0]
 
     # --- proby dla AUC / PR-AUC ---
     try:
@@ -52,7 +60,7 @@ def train_eval_svm(
     except Exception:
         proba = None
 
-    # --- metryki ---
+    # --- metryki klasyfikacji ---
     metrics = {
         "accuracy": accuracy_score(y_val, pred),
         "balanced_accuracy": balanced_accuracy_score(y_val, pred),
@@ -65,24 +73,22 @@ def train_eval_svm(
         metrics["roc_auc"] = roc_auc_score(y_val, proba)
         metrics["pr_auc"] = average_precision_score(y_val, proba)
     else:
+        # fallback – żeby metryki były zawsze zdefiniowane
         metrics["roc_auc"] = metrics["balanced_accuracy"]
         metrics["pr_auc"] = metrics["balanced_accuracy"]
 
     chosen = metrics.get(metric, metrics["balanced_accuracy"])
 
-    # --- tryb zwracania pełnych danych ---
     if return_dict:
         return {
-            "metric": metrics.get(metric, metrics["balanced_accuracy"]),
+            "metric": chosen,
             "all": metrics,
             "fit_time": fit_time,
             "score_time": score_time,
         }
-    return chosen
 
     # --- tryb zwracania jednej metryki ---
-    return metrics.get(metric, metrics["balanced_accuracy"])
-
+    return chosen
 
 
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
@@ -103,6 +109,11 @@ def fit_svm_model(X_train, y_train, cfg: SVMConfig):
 
 def eval_fixed_svm(clf, X_val, y_val, metric: str = "balanced_accuracy") -> float:
     """Ewaluacja ustalonego SVM na podzbiorze walidacji."""
+    profile = get_profile()
+    if profile is not None:
+        profile.n_fixed_eval += 1
+        profile.val_points_evaluated += X_val.shape[0]
+
     pred = clf.predict(X_val)
 
     if metric == "accuracy":
@@ -114,3 +125,20 @@ def eval_fixed_svm(clf, X_val, y_val, metric: str = "balanced_accuracy") -> floa
     else:
         # fallback – balanced_accuracy
         return balanced_accuracy_score(y_val, pred)
+
+def eval_from_predictions(y_true, y_pred, metric: str = "balanced_accuracy") -> float:
+    """
+    Ewaluacja metryki, gdy mamy już gotowe predykcje (bez dodatkowego clf.predict()).
+    Użyteczne w Val-GA do cache'owania predykcji.
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    if metric == "accuracy":
+        return accuracy_score(y_true, y_pred)
+    elif metric == "f1":
+        return f1_score(y_true, y_pred, average="binary", zero_division=0)
+    elif metric == "balanced_accuracy":
+        return balanced_accuracy_score(y_true, y_pred)
+    else:
+        return balanced_accuracy_score(y_true, y_pred)
