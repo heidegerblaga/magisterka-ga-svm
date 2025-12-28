@@ -16,6 +16,4 @@ artifacts/
 *.log
 
 # Data (keep only small samples tracked)
-data/processed/
-data/raw/
 !data/.gitkeep
