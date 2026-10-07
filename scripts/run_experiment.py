@@ -1,140 +1,180 @@
-import click
-import yaml
+from __future__ import annotations
+
+from datetime import datetime
 from pathlib import Path
 import sys
+import time
+import warnings
 
+import click
 import numpy as np
-import pandas as pd
+import yaml
+
+# Val-GA ocenia podzbiory, które bywają jednoklasowe — ostrzeżenia sklearn tylko zaśmiecają logi
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.metrics")
 
 # ensure src on path
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from ga.utils.random import set_global_seed, limit_dataset
-from ga.utils.io import ensure_dirs
-from ga.utils.logger import get_logger
-from ga.data.loader import prepare_train_val
-from ga.models.svm import (
-    SVMConfig,
-    train_eval_svm,
-    fit_svm_model,
-    eval_fixed_svm,
-)
 from ga.encoding import KPerClassConfig
 from ga.fitness import FitnessConfig
 from ga.loop.engine import (
     GAConfig,
-    EarlyStopping,
+    DagaKAdaptationConfig,
     run_ga_k_per_class,
-    ValEncodingConfig,
-    run_val_ga,
+    run_ga_k_per_class_with_trace,
+    run_daga_k_per_class,
+    build_ga_config,
 )
+from ga.models.svm import SVMConfig, evaluate_fitted_svm, train_eval_svm
+from ga.phase_engine import run_phase_experiment
+from ga.reporting import HISTORY_TABLE_COLUMNS, build_report_row, load_datasets_from_config
+from ga.utils.artifacts import (
+    append_csv_row,
+    class_distribution,
+    ensure_artifact_layout,
+    save_mask,
+    summarize_history,
+    summarize_run_manifest_entry,
+    summarize_split,
+    write_csv_rows,
+    write_json,
+    write_latest_run_pointer,
+)
+from ga.utils.logger import get_logger
+from ga.utils.random import set_global_seed
 
 
-# =====================================================================
-# 1) ŁADOWANIE DANYCH
-# =====================================================================
+CYCLE_TABLE_COLUMNS = [
+    "cycle",
+    "k_per_class",
+    "cycle_duration_sec",
+    "train_ga_best_fitness",
+    "train_ga_generations_executed",
+    "train_ga_svm_evaluations",
+    "train_ga_best_val_metric",
+    "train_ga_test_metric",
+    "train_ga_best_full_validation_metric",
+    "val_ga_best_fitness",
+    "val_ga_generations_executed",
+    "val_ga_population_evaluations",
+    "val_ga_adv_increment_metric",
+    "decision",
+    "perfect_on_current_val",
+    "k_increased_this_cycle",
+    "best_sv_ratio",
+    "sv_ratio_at_hardening",
+    "sv_ratio_delta_since_hardening",
+    "sv_ratio_near_threshold",
+    "sv_ratio_stable_since_hardening",
+    "stable_cycles_at_current_k",
+    "forced_growth_after_patience",
+    "val_rows_before",
+    "val_rows_after",
+    "val_rows_added",
+    # --- rozszerzenia badania V' (puste dla trybów innych niż dagasvm_phase) ---
+    "k_after",
+    "decision_reason",
+    "k_increases_this_cycle",
+    "vprime_new_elements",
+    "vprime_dropped_elements",
+    "increment_errors",
+    "increment_error_rate",
+    "candidate_pool_error_rate",
+    "increment_mean_abs_margin",
+    "num_support_vectors",
+    "train_rows",
+    "train_ga_test_accuracy",
+    "train_ga_full_validation_accuracy",
+    "control_model_predictions_cum",
+]
 
-def load_datasets(cfg, log):
-    """Wczytuje train/val przez prepare_train_val + zewnętrzny test (bez nagłówka, ostatnia kolumna = label).
-       Zwraca: X_train, y_train, X_val_full, y_val_full, X_test, y_test
-    """
-    X_train, y_train, X_val, y_val = prepare_train_val(
-        cfg["data"]["train_csv"],
-        cfg["data"].get("validation_csv", ""),
-        cfg["data"]["target"],
-        stratify=cfg["data"].get("stratify", True),
-        seed=cfg.get("seed", 42),
-        header=cfg["data"].get("header", None),
-        target_candidates=cfg["data"].get("target_candidates", []),
+
+def build_svm_config(cfg) -> SVMConfig:
+    return SVMConfig(
+        kernel=cfg["svm"]["kernel"],
+        C=cfg["svm"]["C"],
+        gamma=cfg["svm"]["gamma"],
+        class_weight=cfg["svm"].get("class_weight", "balanced"),
+        probability=cfg["svm"].get("probability", True),
+        standardize=cfg["svm"].get("standardize", True),
     )
 
-    # ograniczenie rozmiaru do szybkich testów
-    X_train, y_train, X_val, y_val = limit_dataset(X_train, X_val, y_train, y_val)
-    log.info(f"Dataset reduced for test: {len(X_train)} train + {len(X_val)} val rows")
 
-    # pełna pula walidacyjna (pod kumulację)
-    X_val_full = X_val
-    y_val_full = y_val
+def build_ga_config_from_cfg(base_key: str, cfg) -> GAConfig:
+    return build_ga_config(cfg.get(base_key, {}))
 
-    # zewnętrzny test: brak nagłówka, ostatnia kolumna = label
-    test_csv = cfg["data"].get("test_csv", "")
-    X_test, y_test = None, None
-    if test_csv:
-        df_test = pd.read_csv(test_csv, header=None)
-        arr = df_test.to_numpy()
-        if arr.shape[1] < 2:
-            raise ValueError(f"test_csv={test_csv} ma za mało kolumn: {arr.shape[1]}")
-        X_test = arr[:, :-1]
-        y_test = arr[:, -1]
-        log.info(
-            f"Loaded external TEST set from {test_csv}: "
-            f"{X_test.shape[0]} rows, {X_test.shape[1]} features, last col as label"
-        )
-    else:
+
+def load_datasets(cfg, log, apply_limit: bool = True):
+    datasets = load_datasets_from_config(cfg, apply_limit=apply_limit)
+    scope = "run" if apply_limit else "full-evaluation"
+    log.info(
+        "Loaded %s datasets: train=%s, validation=%s, test=%s",
+        scope,
+        len(datasets["train"]["X"]),
+        len(datasets["validation"]["X"]),
+        0 if datasets["test"]["X"] is None else len(datasets["test"]["X"]),
+    )
+    if datasets["test"]["X"] is None:
         log.warning("No external test_csv provided in config; external test will be skipped.")
+    return datasets
 
-    return X_train, y_train, X_val_full, y_val_full, X_test, y_test
-
-
-# =====================================================================
-# 2) BASELINE
-# =====================================================================
 
 def run_baseline_phase(X_train, y_train, X_val, y_val, X_test, y_test, svm_cfg, cfg, log):
-    """Liczy baseline na walidacji + (opcjonalnie) na teście."""
     metric = cfg.get("fitness", {}).get("metric", "balanced_accuracy")
 
     res_val = train_eval_svm(
-        X_train, y_train, X_val, y_val,
+        X_train,
+        y_train,
+        X_val,
+        y_val,
         svm_cfg,
         metric=metric,
         return_dict=True,
+        return_model=True,
     )
+    baseline_model = res_val.pop("model")
     log.info(
-        f"Baseline SVM ({svm_cfg.kernel}) VAL {metric}: {res_val['metric']:.4f} | "
-        f"all={res_val['all']} | fit={res_val['fit_time']:.3f}s, score={res_val['score_time']:.3f}s"
+        "Baseline SVM (%s) VAL %s: %.4f | all=%s | fit=%.3fs, score=%.3fs",
+        svm_cfg.kernel,
+        metric,
+        res_val["metric"],
+        res_val["all"],
+        res_val["fit_time"],
+        res_val["score_time"],
     )
 
     res_test = None
     if X_test is not None:
-        res_test = train_eval_svm(
-            X_train, y_train, X_test, y_test,
-            svm_cfg,
-            metric=metric,
-            return_dict=True,
-        )
+        res_test = evaluate_fitted_svm(baseline_model, X_test, y_test, metric=metric)
         log.info(
-            f"Baseline SVM ({svm_cfg.kernel}) TEST {metric}: {res_test['metric']:.4f} | "
-            f"all={res_test['all']} | fit={res_test['fit_time']:.3f}s, score={res_test['score_time']:.3f}s"
+            "Baseline SVM (%s) TEST %s: %.4f | all=%s | score=%.3fs",
+            svm_cfg.kernel,
+            metric,
+            res_test["metric"],
+            res_test["all"],
+            res_test["score_time"],
         )
     return res_val, res_test
 
 
-# =====================================================================
-# 3) PĘTLA CYKLI: TRAIN-GA + VAL-GA + K-SCHEDULE + KUMULACJA WALIDACJI
-# =====================================================================
-
-def build_ga_config_from_cfg(base_key: str, cfg) -> GAConfig:
-    """Pomocniczo: GAConfig z sekcji cfg[base_key] (np. 'ga' lub 'val_ga')."""
-    section = cfg.get(base_key, {})
-    gcfg = GAConfig(
-        population_size=section.get("population_size", 60),
-        generations=section.get("generations", 20),
-        tournament_k=section.get("tournament_k", 3),
-        crossover_rate=section.get("crossover_rate", 0.8),
-        mutation_rate=section.get("mutation_rate", 0.05),
-        elitism=section.get("elitism", 2),
-        early_stopping=section.get(
-            "early_stopping",
-            {"patience": 0, "min_delta": 0.0},
-        ),
-    )
-    if isinstance(gcfg.early_stopping, dict):
-        gcfg.early_stopping = EarlyStopping(**gcfg.early_stopping)
-    return gcfg
+def run_full_svm_mode(X_train, y_train, X_val, y_val, cfg, log):
+    return {
+        "cycles": [],
+        "cycle_table_rows": [],
+        "global_best": None,
+        "final_global_val": summarize_split(X_val, y_val),
+        "representative_model": {
+            "algorithm_mode": "full_svm",
+            "training_rows": int(len(X_train)),
+            "validation_rows": int(len(X_val)),
+            "train_mask_path": None,
+            "cycle": None,
+        },
+    }
 
 
-def run_train_val_cycles(
+def run_gasvm_mode(
     X_train,
     y_train,
     X_val_full,
@@ -144,236 +184,561 @@ def run_train_val_cycles(
     svm_cfg,
     cfg,
     log,
+    artifact_layout,
 ):
-    """Główna pętla eksperymentu:
-       - kumulacja walidacji
-       - harmonogram k
-       - w każdym cyklu: TRAIN-GA (k-per-class) + Val-GA (adwersarialna walidacja)
-       - ewaluacja na VAL i TEST
-    """
+    baseline_metric = cfg.get("fitness", {}).get("metric", "balanced_accuracy")
+    fcfg = FitnessConfig(
+        metric=baseline_metric,
+        class_imbalance_penalty=cfg.get("fitness", {}).get("class_imbalance_penalty", 0.0),
+    )
+    k_per_class = int(cfg.get("encoding", {}).get("k_per_class", 20))
+    kcfg = KPerClassConfig(k_per_class=k_per_class, random_state=cfg.get("seed", 42))
+    gcfg_train = build_ga_config_from_cfg("ga", cfg)
 
-    # --- fitness config ---
+    metrics_dir = Path(artifact_layout["metrics"])
+    checkpoints_dir = Path(artifact_layout["checkpoints"])
+    cycle_start = time.perf_counter()
+    log.info("=" * 60)
+    log.info("FAZA TRAIN-GA (GASVM), k_per_class=%s", k_per_class)
+
+    history_train, best_train_mask, trace, best_masks_per_gen = run_ga_k_per_class_with_trace(
+        X_pool=X_train,
+        y_pool=y_train,
+        X_val=X_val_full,
+        y_val=y_val_full,
+        kcfg=kcfg,
+        svm_cfg=svm_cfg,
+        fcfg=fcfg,
+        gcfg=gcfg_train,
+        seed=cfg.get("seed", 42),
+    )
+
+    train_history_summary = summarize_history(
+        history_train,
+        gcfg_train.population_size,
+        evaluation_label="svm_evaluations",
+    )
+    train_history_summary["trace"] = trace
+    train_history_path = metrics_dir / "cycle_01_train_ga_history.json"
+    write_json(train_history_path, train_history_summary)
+
+    best_masks_path = checkpoints_dir / "cycle_01_best_masks_per_generation.npy"
+    np.save(best_masks_path, best_masks_per_gen.astype(bool, copy=False))
+
+    best_train_mask_path = checkpoints_dir / "cycle_01_best_train_mask.npy"
+    global_best_mask_path = checkpoints_dir / "global_best_train_mask.npy"
+    save_mask(best_train_mask_path, best_train_mask)
+    save_mask(global_best_mask_path, best_train_mask)
+
+    X_tr_best = X_train[best_train_mask]
+    y_tr_best = y_train[best_train_mask]
+
+    best_res_val = train_eval_svm(
+        X_tr_best,
+        y_tr_best,
+        X_val_full,
+        y_val_full,
+        svm_cfg,
+        metric=baseline_metric,
+        return_dict=True,
+    )
+    log.info(
+        "[TRAIN-GA GASVM] best VAL %s: %.4f | all=%s | fit=%.3fs, score=%.3fs",
+        baseline_metric,
+        best_res_val["metric"],
+        best_res_val["all"],
+        best_res_val["fit_time"],
+        best_res_val["score_time"],
+    )
+
+    best_res_test = None
+    if X_test is not None:
+        best_res_test = train_eval_svm(
+            X_tr_best,
+            y_tr_best,
+            X_test,
+            y_test,
+            svm_cfg,
+            metric=baseline_metric,
+            return_dict=True,
+        )
+        log.info(
+            "[TRAIN-GA GASVM] TEST %s: %.4f | all=%s | fit=%.3fs, score=%.3fs",
+            baseline_metric,
+            best_res_test["metric"],
+            best_res_test["all"],
+            best_res_test["fit_time"],
+            best_res_test["score_time"],
+        )
+
+    cycle_duration_sec = time.perf_counter() - cycle_start
+    cycle_summary = {
+        "cycle": 1,
+        "k_per_class": k_per_class,
+        "cycle_duration_sec": cycle_duration_sec,
+        "train_pool": summarize_split(X_train, y_train),
+        "current_val": summarize_split(X_val_full, y_val_full),
+        "best_train": summarize_split(X_tr_best, y_tr_best),
+        "train_ga": {
+            "history_path": str(train_history_path),
+            "best_train_mask_path": str(best_train_mask_path),
+            "best_masks_per_generation_path": str(best_masks_path),
+            "history_summary": train_history_summary,
+            "best_val": best_res_val,
+            "best_test": best_res_test,
+        },
+    }
+    cycle_row = {
+        "cycle": 1,
+        "k_per_class": k_per_class,
+        "cycle_duration_sec": cycle_duration_sec,
+        "train_ga_best_fitness": train_history_summary["best_final_fitness"],
+        "train_ga_generations_executed": train_history_summary["generations_executed"],
+        "train_ga_svm_evaluations": train_history_summary["svm_evaluations"],
+        "train_ga_best_val_metric": float(best_res_val["metric"]),
+        "train_ga_test_metric": None if best_res_test is None else float(best_res_test["metric"]),
+        "val_ga_best_fitness": None,
+        "val_ga_generations_executed": None,
+        "val_ga_population_evaluations": None,
+        "val_ga_adv_increment_metric": None,
+        "val_rows_before": int(len(X_val_full)),
+        "val_rows_after": int(len(X_val_full)),
+        "val_rows_added": 0,
+    }
+
+    return {
+        "cycles": [cycle_summary],
+        "cycle_table_rows": [cycle_row],
+        "global_best": {
+            "cycle": 1,
+            "k_per_class": k_per_class,
+            "metrics_val": best_res_val,
+            "metrics_test": best_res_test,
+            "train_summary": summarize_split(X_tr_best, y_tr_best),
+            "train_mask_path": str(global_best_mask_path),
+            "validation_rows": int(len(X_val_full)),
+        },
+        "final_global_val": summarize_split(X_val_full, y_val_full),
+        "representative_model": {
+            "algorithm_mode": "gasvm",
+            "training_rows": int(len(X_tr_best)),
+            "validation_rows": int(len(X_val_full)),
+            "train_mask_path": str(global_best_mask_path),
+            "cycle": 1,
+        },
+    }
+
+
+def run_dagasvm_mode(
+    X_train,
+    y_train,
+    X_val_full,
+    y_val_full,
+    X_test,
+    y_test,
+    svm_cfg,
+    cfg,
+    log,
+    artifact_layout,
+):
+    """DAGASVM (2014): adaptacyjne zwiększanie K w trakcie pojedynczego runu.
+
+    Implementacja opiera się na schemacie:
+      - stable chromosome size counter: `cs` oraz próg `Ts`
+      - SV ratio: ρ_SV = s / t'
+      - próg TSV oraz mnożnik δK do zwiększania K
+      - LGA mode (local/global) w selekcji rodziców
+    """
     baseline_metric = cfg.get("fitness", {}).get("metric", "balanced_accuracy")
     fcfg = FitnessConfig(
         metric=baseline_metric,
         class_imbalance_penalty=cfg.get("fitness", {}).get("class_imbalance_penalty", 0.0),
     )
 
-    # --- harmonogram k ---
+    daga_cfg = cfg.get("daga", {})
     ks_cfg = cfg.get("k_schedule", {})
-    num_cycles = ks_cfg.get("num_cycles", 1)
-    k_start = ks_cfg.get("k_start", cfg.get("encoding", {}).get("k_per_class", 20))
-    k_mult = ks_cfg.get("k_multiplier", 1.5)
-
-    # --- kumulacja walidacji ---
-    val_cum_cfg = cfg.get("val_cumulation", {})
-    initial_val_fraction = val_cum_cfg.get("initial_fraction", 0.5)
-
-    n_val_full = X_val_full.shape[0]
-    n_init = max(1, int(round(initial_val_fraction * n_val_full)))
-
-    rng = np.random.default_rng(cfg.get("seed", 42))
-    global_val_mask = np.zeros(n_val_full, dtype=bool)
-    init_idx = rng.choice(n_val_full, size=n_init, replace=False)
-    global_val_mask[init_idx] = True
-
-    log.info(
-        f"Początkowa walidacja: {global_val_mask.sum()} / {n_val_full} próbek "
-        f"(initial_fraction={initial_val_fraction})"
+    k_start = int(
+        daga_cfg.get(
+            "k_start",
+            ks_cfg.get("k_start", cfg.get("encoding", {}).get("k_per_class", 20)),
+        )
+    )
+    daca = DagaKAdaptationConfig(
+        k_start=k_start,
+        TSV=float(daga_cfg.get("TSV", daga_cfg.get("tsv", 0.25))),
+        Ts=int(daga_cfg.get("Ts", daga_cfg.get("stable_chromosome_size_counter", 3))),
+        epsilon=float(daga_cfg.get("epsilon", daga_cfg.get("lga_epsilon", 0.5))),
+        k_max=None if daga_cfg.get("k_max") is None else int(daga_cfg.get("k_max")),
     )
 
-    current_k = k_start
-    global_best_val = -1.0
-    global_best_info = {}
+    metrics_dir = Path(artifact_layout["metrics"])
+    checkpoints_dir = Path(artifact_layout["checkpoints"])
 
-    for cycle in range(num_cycles):
-        log.info("=" * 60)
-        log.info(f"FAZA TRAIN-GA (cykl {cycle+1}/{num_cycles}), k_per_class≈{int(round(current_k))}")
+    cycle_start = time.perf_counter()
+    log.info("=" * 60)
+    log.info(
+        "FAZA TRAIN-GA (DAGASVM, adaptive K) | k_start=%s TSV=%s Ts=%s epsilon=%s k_max=%s",
+        daca.k_start,
+        daca.TSV,
+        daca.Ts,
+        daca.epsilon,
+        daca.k_max,
+    )
 
-        # aktualna (skumulowana) walidacja
-        X_val_curr = X_val_full[global_val_mask]
-        y_val_curr = y_val_full[global_val_mask]
-        log.info(
-            f"[cykl {cycle+1}] aktualny rozmiar walidacji: "
-            f"{X_val_curr.shape[0]} / {X_val_full.shape[0]} próbek"
-        )
+    gcfg_train = build_ga_config_from_cfg("ga", cfg)
+    history_train, best_train_mask, trace, best_masks_per_gen = run_daga_k_per_class(
+        X_pool=X_train,
+        y_pool=y_train,
+        X_val=X_val_full,
+        y_val=y_val_full,
+        kcfg=KPerClassConfig(k_per_class=k_start, random_state=cfg.get("seed", 42)),
+        daca=daca,
+        svm_cfg=svm_cfg,
+        fcfg=fcfg,
+        gcfg=gcfg_train,
+        seed=cfg.get("seed", 42),
+    )
 
-        # --- TRAIN-GA ---
-        kcfg = KPerClassConfig(
-            k_per_class=int(round(current_k)),
-            random_state=cfg.get("seed", 42) + cycle,
-        )
-        gcfg_train = build_ga_config_from_cfg("ga", cfg)
+    train_history_summary = summarize_history(
+        history_train,
+        gcfg_train.population_size,
+        evaluation_label="svm_evaluations",
+    )
+    train_history_summary["trace"] = trace
+    train_history_path = metrics_dir / "cycle_01_daga_train_history.json"
+    write_json(train_history_path, train_history_summary)
 
-        history_train, best_train_mask = run_ga_k_per_class(
-            X_pool=X_train,
-            y_pool=y_train,
-            X_val=X_val_curr,
-            y_val=y_val_curr,
-            kcfg=kcfg,
-            svm_cfg=svm_cfg,
-            fcfg=fcfg,
-            gcfg=gcfg_train,
-            seed=cfg.get("seed", 42) + cycle,
-        )
+    best_masks_path = checkpoints_dir / "cycle_01_best_masks_per_generation.npy"
+    np.save(best_masks_path, best_masks_per_gen.astype(bool, copy=False))
 
-        X_tr_best = X_train[best_train_mask]
-        y_tr_best = y_train[best_train_mask]
+    best_train_mask_path = checkpoints_dir / "cycle_01_best_train_mask.npy"
+    global_best_mask_path = checkpoints_dir / "global_best_train_mask.npy"
+    save_mask(best_train_mask_path, best_train_mask)
+    save_mask(global_best_mask_path, best_train_mask)
 
-        best_res_val = train_eval_svm(
-            X_tr_best, y_tr_best, X_val_curr, y_val_curr,
+    X_tr_best = X_train[best_train_mask]
+    y_tr_best = y_train[best_train_mask]
+
+    best_res_val = train_eval_svm(
+        X_tr_best,
+        y_tr_best,
+        X_val_full,
+        y_val_full,
+        svm_cfg,
+        metric=baseline_metric,
+        return_dict=True,
+    )
+    log.info(
+        "[DAGASVM] best VAL %s: %.4f | all=%s | fit=%.3fs, score=%.3fs | SV=%s",
+        baseline_metric,
+        best_res_val["metric"],
+        best_res_val["all"],
+        best_res_val["fit_time"],
+        best_res_val["score_time"],
+        best_res_val.get("num_support_vectors"),
+    )
+
+    best_res_test = None
+    if X_test is not None:
+        best_res_test = train_eval_svm(
+            X_tr_best,
+            y_tr_best,
+            X_test,
+            y_test,
             svm_cfg,
             metric=baseline_metric,
             return_dict=True,
         )
         log.info(
-            f"[TRAIN-GA cykl {cycle+1}] best VAL {baseline_metric}: "
-            f"{best_res_val['metric']:.4f} | all={best_res_val['all']} | "
-            f"fit={best_res_val['fit_time']:.3f}s, score={best_res_val['score_time']:.3f}s"
+            "[DAGASVM] TEST %s: %.4f | all=%s | fit=%.3fs, score=%.3fs",
+            baseline_metric,
+            best_res_test["metric"],
+            best_res_test["all"],
+            best_res_test["fit_time"],
+            best_res_test["score_time"],
         )
 
-        # aktualizacja globalnego best
-        if best_res_val["metric"] > global_best_val:
-            global_best_val = best_res_val["metric"]
-            global_best_info = {
-                "cycle": cycle + 1,
-                "k_per_class": int(round(current_k)),
-                "train_mask": best_train_mask.copy(),
-                "metrics_val": best_res_val,
+    cycle_duration_sec = time.perf_counter() - cycle_start
+    cycle_summary = {
+        "cycle": 1,
+        "k_start": int(daca.k_start),
+        "cycle_duration_sec": float(cycle_duration_sec),
+        "train_pool": summarize_split(X_train, y_train),
+        "validation_full": summarize_split(X_val_full, y_val_full),
+        "best_train": summarize_split(X_tr_best, y_tr_best),
+        "train_ga": {
+            "history_path": str(train_history_path),
+            "best_train_mask_path": str(best_train_mask_path),
+            "best_masks_per_generation_path": str(best_masks_path),
+            "history_summary": train_history_summary,
+            "best_val": best_res_val,
+            "best_test": best_res_test,
+        },
+        "daga": {
+            "TSV": float(daca.TSV),
+            "Ts": int(daca.Ts),
+            "epsilon": float(daca.epsilon),
+            "k_max": None if daca.k_max is None else int(daca.k_max),
+        },
+    }
+
+    return {
+        "cycles": [cycle_summary],
+        "cycle_table_rows": [
+            {
+                "cycle": 1,
+                "k_per_class": int(daca.k_start),
+                "cycle_duration_sec": float(cycle_duration_sec),
+                "train_ga_best_fitness": train_history_summary["best_final_fitness"],
+                "train_ga_generations_executed": train_history_summary["generations_executed"],
+                "train_ga_svm_evaluations": train_history_summary["svm_evaluations"],
+                "train_ga_best_val_metric": float(best_res_val["metric"]),
+                "train_ga_test_metric": None
+                if best_res_test is None
+                else float(best_res_test["metric"]),
+                "val_ga_best_fitness": None,
+                "val_ga_generations_executed": None,
+                "val_ga_population_evaluations": None,
+                "val_ga_adv_increment_metric": None,
+                "val_rows_before": int(len(X_val_full)),
+                "val_rows_after": int(len(X_val_full)),
+                "val_rows_added": 0,
             }
-
-        # ewaluacja TEŚCIOWA dla tego cyklu
-        if X_test is not None:
-            best_res_test = train_eval_svm(
-                X_tr_best, y_tr_best, X_test, y_test,
-                svm_cfg,
-                metric=baseline_metric,
-                return_dict=True,
-            )
-            log.info(
-                f"[TRAIN-GA cykl {cycle+1}] TEST {baseline_metric}: "
-                f"{best_res_test['metric']:.4f} | all={best_res_test['all']} | "
-                f"fit={best_res_test['fit_time']:.3f}s, score={best_res_test['score_time']:.3f}s"
-            )
-
-        # --- VAL-GA: adwersarialna walidacja na ustalonym SVM ---
-        log.info(f"FAZA VAL-GA (cykl {cycle+1}/{num_cycles}), k_per_class≈{int(round(current_k))}")
-        clf_fixed = fit_svm_model(X_tr_best, y_tr_best, svm_cfg)
-
-        vcfg = ValEncodingConfig(
-            subset_fraction=cfg.get("val_ga", {}).get("subset_fraction", 0.5)
-        )
-        gcfg_val = build_ga_config_from_cfg("val_ga", cfg)
-
-        # kandydaci do inkrementu: te próbki walidacji, które JESZCZE nie są w global_val_mask
-        candidate_mask = ~global_val_mask
-        if not np.any(candidate_mask):
-            log.info(f"[VAL-GA cykl {cycle+1}] brak kandydatów do inkrementu walidacji.")
-            history_val_ga = np.array([0.0])
-            adv_val_mask_global = np.zeros_like(global_val_mask, dtype=bool)
-        else:
-            X_val_candidates = X_val_full[candidate_mask]
-            y_val_candidates = y_val_full[candidate_mask]
-
-            history_val_ga, adv_val_mask_local = run_val_ga(
-                X_val=X_val_candidates,
-                y_val=y_val_candidates,
-                clf=clf_fixed,
-                vcfg=vcfg,
-                gcfg=gcfg_val,
-                metric=baseline_metric,
-                seed=cfg.get("seed", 42) + 1000 + cycle,
-            )
-
-            # mapujemy maskę lokalną (nad kandydatami) na maskę globalną
-            adv_val_mask_global = np.zeros_like(global_val_mask, dtype=bool)
-            adv_val_mask_global[candidate_mask] = adv_val_mask_local
-
-        # ewaluacja adwersarialnego przyrostu (raport)
-        if np.any(adv_val_mask_global):
-            X_val_adv = X_val_full[adv_val_mask_global]
-            y_val_adv = y_val_full[adv_val_mask_global]
-            adv_metric = eval_fixed_svm(clf_fixed, X_val_adv, y_val_adv, metric=baseline_metric)
-        else:
-            adv_metric = None
-
-        if history_val_ga.size > 0:
-            log.info(
-                f"[VAL-GA cykl {cycle+1}] best adversarial fitness: {history_val_ga[-1]:.4f} "
-                f"(~ min {baseline_metric} ≈ {1.0 - history_val_ga[-1]:.4f})"
-            )
-        if adv_metric is not None:
-            log.info(
-                f"[VAL-GA cykl {cycle+1}] adversarial INCREMENT {baseline_metric}: {adv_metric:.4f} "
-                f"vs normal VAL (po TRAIN-GA) {baseline_metric}: {best_res_val['metric']:.4f}"
-            )
-
-        # --- KUMULACJA WALIDACJI ---
-        before = int(global_val_mask.sum())
-        global_val_mask = np.logical_or(global_val_mask, adv_val_mask_global)
-        after = int(global_val_mask.sum())
-        log.info(
-            f"[VAL-GA cykl {cycle+1}] kumulacja walidacji: {before} -> {after} próbek "
-            f"(dodano {after - before})"
-        )
-
-        # --- PRZEŁĄCZNIK FAZ: zwiększamy k na kolejny cykl ---
-        prev_k = int(round(current_k))
-        current_k = current_k * k_mult
-        log.info(
-            f"Przejście VAL -> TRAIN: k_per_class {prev_k} -> ~{int(round(current_k))} "
-            f"(mnożnik={k_mult})"
-        )
-
-    # podsumowanie globalnie najlepszego wyniku na walidacji
-    if global_best_info:
-        log.info(
-            f"GLOBALNIE najlepszy VAL {baseline_metric}: "
-            f"{global_best_info['metrics_val']['metric']:.4f} "
-            f"w cyklu {global_best_info['cycle']} przy k_per_class={global_best_info['k_per_class']}"
-        )
+        ],
+        "global_best": {
+            "cycle": 1,
+            "k_per_class": int(daca.k_start),
+            "metrics_val": best_res_val,
+            "metrics_test": best_res_test,
+            "train_summary": summarize_split(X_tr_best, y_tr_best),
+            "train_mask_path": str(global_best_mask_path),
+            "validation_rows": int(len(X_val_full)),
+        },
+        "final_global_val": summarize_split(X_val_full, y_val_full),
+        "representative_model": {
+            "algorithm_mode": "dagasvm",
+            "training_rows": int(len(X_tr_best)),
+            "validation_rows": int(len(X_val_full)),
+            "train_mask_path": str(global_best_mask_path),
+            "cycle": 1,
+        },
+    }
 
 
-# =====================================================================
-# 4) GŁÓWNA FUNKCJA – TERAZ BARDZO CIENKA
-# =====================================================================
+def run_dagasvm_phase_mode(
+    X_train,
+    y_train,
+    X_val_full,
+    y_val_full,
+    X_test,
+    y_test,
+    svm_cfg,
+    cfg,
+    log,
+    artifact_layout,
+):
+    """Fazowy DAGASVM (T'/V'); logika w ``ga.phase_engine`` (patrz opis rozdziału ról V i V')."""
+    return run_phase_experiment(
+        X_train,
+        y_train,
+        X_val_full,
+        y_val_full,
+        X_test,
+        y_test,
+        svm_cfg,
+        cfg,
+        log,
+        artifact_layout,
+    )
+
+
+run_dagasvm_valga_mode = run_dagasvm_phase_mode
+
 
 @click.command()
 @click.option("--config", "-c", type=click.Path(exists=True), required=True)
-def main(config):
+@click.option(
+    "--artifacts-root",
+    default=None,
+    help="Katalog wyjściowy (domyślnie: cfg['artifacts_root'] albo 'artifacts').",
+)
+def main(config, artifacts_root):
+    experiment_start = time.perf_counter()
     cfg = yaml.safe_load(Path(config).read_text(encoding="utf-8"))
+    cfg.setdefault("dataset_name", cfg.get("experiment_name", "dataset"))
+    cfg.setdefault("algorithm_mode", "dagasvm")
 
+    created_at = datetime.now().isoformat(timespec="seconds")
     set_global_seed(cfg.get("seed", 42))
-    log = get_logger()
-    log.info(f"Loaded config: {cfg.get('experiment_name', 'exp')}")
+    artifact_layout = ensure_artifact_layout(
+        outdir=artifacts_root or cfg.get("artifacts_root", "artifacts"),
+        experiment_name=cfg.get("experiment_name", "exp"),
+    )
+    run_root = Path(artifact_layout["run_root"])
+    log_path = Path(artifact_layout["logs"]) / f"{artifact_layout['run_id']}.log"
+    log = get_logger(log_path=log_path)
+    log.info(
+        "Loaded config: %s | dataset=%s | mode=%s | run_id=%s | artifacts=%s",
+        cfg.get("experiment_name", "exp"),
+        cfg.get("dataset_name", "dataset"),
+        cfg.get("algorithm_mode", "dagasvm"),
+        artifact_layout["run_id"],
+        run_root,
+    )
+    write_json(Path(artifact_layout["metrics"]) / "config_snapshot.json", cfg)
 
-    ensure_dirs(["artifacts/checkpoints", "artifacts/metrics", "artifacts/plots"])
+    datasets = load_datasets(cfg, log, apply_limit=True)
+    X_train = datasets["train"]["X"]
+    y_train = datasets["train"]["y"]
+    X_val_full = datasets["validation"]["X"]
+    y_val_full = datasets["validation"]["y"]
+    X_test = datasets["test"]["X"]
+    y_test = datasets["test"]["y"]
 
-    # 1) dane
-    X_train, y_train, X_val_full, y_val_full, X_test, y_test = load_datasets(cfg, log)
+    max_rows = cfg.get("data", {}).get("max_rows", 1000)
+    if max_rows is None or max_rows <= 0:
+        full_eval_datasets = datasets
+    else:
+        full_eval_datasets = load_datasets(cfg, log, apply_limit=False)
 
-    # 2) konfiguracja SVM
-    svm_cfg = SVMConfig(
-        kernel=cfg["svm"]["kernel"],
-        C=cfg["svm"]["C"],
-        gamma=cfg["svm"]["gamma"],
-        class_weight=cfg["svm"]["class_weight"],
+    svm_cfg = build_svm_config(cfg)
+    baseline_val, baseline_test = run_baseline_phase(
+        X_train,
+        y_train,
+        X_val_full,
+        y_val_full,
+        X_test,
+        y_test,
+        svm_cfg,
+        cfg,
+        log,
+    )
+    write_json(
+        Path(artifact_layout["metrics"]) / "baseline.json",
+        {"val": baseline_val, "test": baseline_test},
     )
 
-    # 3) baseline
-    run_baseline_phase(X_train, y_train, X_val_full, y_val_full, X_test, y_test, svm_cfg, cfg, log)
+    mode = cfg.get("algorithm_mode", "dagasvm")
+    if mode == "full_svm":
+        mode_outputs = run_full_svm_mode(X_train, y_train, X_val_full, y_val_full, cfg, log)
+    elif mode == "gasvm":
+        mode_outputs = run_gasvm_mode(
+            X_train,
+            y_train,
+            X_val_full,
+            y_val_full,
+            X_test,
+            y_test,
+            svm_cfg,
+            cfg,
+            log,
+            artifact_layout,
+        )
+    elif mode in {"dagasvm_valga", "dagasvm_phase"}:
+        mode_outputs = run_dagasvm_phase_mode(
+            X_train,
+            y_train,
+            X_val_full,
+            y_val_full,
+            X_test,
+            y_test,
+            svm_cfg,
+            cfg,
+            log,
+            artifact_layout,
+        )
+    else:
+        mode_outputs = run_dagasvm_mode(
+            X_train,
+            y_train,
+            X_val_full,
+            y_val_full,
+            X_test,
+            y_test,
+            svm_cfg,
+            cfg,
+            log,
+            artifact_layout,
+        )
 
-    # 4) cykle TRAIN-GA + VAL-GA + harmonogram k + kumulacja walidacji
-    run_train_val_cycles(
-        X_train=X_train,
-        y_train=y_train,
-        X_val_full=X_val_full,
-        y_val_full=y_val_full,
-        X_test=X_test,
-        y_test=y_test,
-        svm_cfg=svm_cfg,
+    experiment_summary = {
+        "created_at": created_at,
+        "run_id": artifact_layout["run_id"],
+        "experiment_name": cfg.get("experiment_name", "exp"),
+        "dataset_name": cfg.get("dataset_name", cfg.get("experiment_name", "dataset")),
+        "algorithm_mode": mode,
+        "sweep_id": cfg.get("sweep_id"),
+        "trial_id": cfg.get("trial_id"),
+        "trial_overrides": cfg.get("trial_overrides"),
+        "objective_metric_name": cfg.get("fitness", {}).get("metric", "balanced_accuracy"),
+        "run_root": str(run_root),
+        "seed": cfg.get("seed", 42),
+        "log_path": str(log_path),
+        "dataset": {
+            "train": summarize_split(X_train, y_train),
+            "validation_full": summarize_split(X_val_full, y_val_full),
+            "test": summarize_split(X_test, y_test),
+        },
+        "baseline": {
+            "val": baseline_val,
+            "test": baseline_test,
+        },
+        "phase_study": mode_outputs.get("phase_study"),
+        "cycles": mode_outputs["cycles"],
+        "global_best": mode_outputs["global_best"],
+        "final_global_val": mode_outputs["final_global_val"],
+        "representative_model": mode_outputs["representative_model"],
+        "experiment_duration_sec": time.perf_counter() - experiment_start,
+    }
+
+    summary_path = Path(artifact_layout["metrics"]) / "summary.json"
+    cycles_path = Path(artifact_layout["metrics"]) / "cycles.csv"
+    experiment_summary["summary_path"] = str(summary_path)
+    experiment_summary["report_row"] = build_report_row(
+        experiment_summary,
         cfg=cfg,
-        log=log,
+        actual_datasets=datasets,
+        full_eval_datasets=full_eval_datasets,
+    )
+
+    write_json(summary_path, experiment_summary)
+    write_csv_rows(cycles_path, mode_outputs["cycle_table_rows"], fieldnames=CYCLE_TABLE_COLUMNS)
+
+    global_best = mode_outputs["global_best"] or {}
+    best_val_metric = (global_best.get("metrics_val") or {}).get("metric")
+    best_cycle = global_best.get("cycle")
+    best_k = global_best.get("k_per_class")
+    if mode == "full_svm":
+        best_val_metric = baseline_val["metric"]
+        best_cycle = None
+        best_k = None
+
+    manifest_entry = summarize_run_manifest_entry(
+        run_id=str(artifact_layout["run_id"]),
+        experiment_name=cfg.get("experiment_name", "exp"),
+        run_root=run_root,
+        log_path=log_path,
+        summary_path=summary_path,
+        seed=cfg.get("seed", 42),
+        best_val_metric=best_val_metric,
+        best_cycle=best_cycle,
+        best_k_per_class=best_k,
+        duration_sec=experiment_summary["experiment_duration_sec"],
+    )
+    manifest_entry["created_at"] = created_at
+    append_csv_row(artifact_layout["index_csv"], manifest_entry)
+    write_latest_run_pointer(artifact_layout["latest_json"], manifest_entry)
+    append_csv_row(
+        artifact_layout["history_table_csv"],
+        experiment_summary["report_row"],
+        fieldnames=HISTORY_TABLE_COLUMNS,
+    )
+
+    log.info(
+        "Saved artifacts to %s and updated %s + %s",
+        run_root,
+        artifact_layout["index_csv"],
+        artifact_layout["history_table_csv"],
     )
 
 

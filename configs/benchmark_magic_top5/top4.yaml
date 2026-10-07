@@ -1,0 +1,55 @@
+algorithm_mode: dagasvm
+data:
+  train_csv: data/benchmarks/magic_gamma/train.csv
+  validation_csv: data/benchmarks/magic_gamma/validation.csv
+  test_csv: data/benchmarks/magic_gamma/test.csv
+  target: label
+  stratify: true
+  header: true
+  target_candidates:
+  - label
+  - target
+  - y
+  - class
+  max_rows: null
+encoding:
+  k_per_class: 1000
+experiment_name: magic_gamma_top4_20260425_221840_027900_dagasvm_smallsample_probe_sample_6_trial_006
+fitness:
+  class_imbalance_penalty: 0.0
+  metric: f1
+ga:
+  crossover_rate: 0.8
+  early_stopping:
+    min_delta: 0.001
+    patience: 4
+  elitism: 2
+  generations: 12
+  mutation_rate: 0.05
+  population_size: 24
+  tournament_k: 3
+k_schedule:
+  k_multiplier: 1.5
+  k_start: 1000
+  num_cycles: 2
+seed: 43
+svm:
+  C: 10.0
+  class_weight: balanced
+  gamma: 0.15
+  kernel: rbf
+  probability: false
+val_cumulation:
+  initial_fraction: 0.15
+val_ga:
+  crossover_rate: 0.8
+  early_stopping:
+    min_delta: 0.001
+    patience: 4
+  elitism: 2
+  generations: 10
+  mutation_rate: 0.05
+  population_size: 20
+  subset_fraction: 0.1
+  tournament_k: 3
+dataset_name: magic_gamma_uci

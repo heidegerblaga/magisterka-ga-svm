@@ -1,0 +1,9 @@
+sweep_name: dagasvm_phase_evolutionary_seeds20
+num_trials: 20
+max_parallel: 4
+selection_seed: 42
+objective:
+  name: full_validation_f1
+  mode: max
+search_space:
+  seed: [42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61]

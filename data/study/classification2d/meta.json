@@ -1,0 +1,57 @@
+{
+  "name": "classification2d",
+  "features": 2,
+  "generator_seed": 2026,
+  "split_seed": 2026,
+  "split_fractions_train_val_test": [
+    0.4,
+    0.4,
+    0.2
+  ],
+  "splits": {
+    "train": {
+      "rows": 4800,
+      "class_counts": {
+        "0": 2395,
+        "1": 2405
+      },
+      "class_proportions": {
+        "0": 0.499,
+        "1": 0.501
+      }
+    },
+    "validation": {
+      "rows": 4800,
+      "class_counts": {
+        "0": 2395,
+        "1": 2405
+      },
+      "class_proportions": {
+        "0": 0.499,
+        "1": 0.501
+      }
+    },
+    "test": {
+      "rows": 2400,
+      "class_counts": {
+        "0": 1197,
+        "1": 1203
+      },
+      "class_proportions": {
+        "0": 0.4988,
+        "1": 0.5012
+      }
+    }
+  },
+  "scaler": null,
+  "generator": "sklearn.datasets.make_classification",
+  "params": {
+    "n_samples": 12000,
+    "n_features": 2,
+    "n_informative": 2,
+    "n_redundant": 0,
+    "n_clusters_per_class": 2,
+    "class_sep": 1.2,
+    "flip_y": 0.02
+  }
+}

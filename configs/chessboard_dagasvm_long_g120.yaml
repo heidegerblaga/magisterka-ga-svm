@@ -1,0 +1,44 @@
+seed: 42
+experiment_name: "chessboard_dagasvm_long_g120"
+dataset_name: "Chessboard"
+algorithm_mode: "dagasvm"
+
+data:
+  train_csv: "data/raw/train.csv"
+  validation_csv: "data/raw/validation.csv"
+  test_csv: "data/raw/test.csv"
+  target: "label"
+  stratify: true
+  header: false
+  target_candidates: ["target", "y", "class"]
+  max_rows: 0
+
+svm:
+  kernel: "rbf"
+  C: 10.0
+  gamma: 0.002
+  class_weight: "balanced"
+  probability: false
+  standardize: false
+
+fitness:
+  metric: balanced_accuracy
+  class_imbalance_penalty: 0.0
+
+ga:
+  population_size: 30
+  generations: 120
+  tournament_k: 3
+  crossover_rate: 0.8
+  mutation_rate: 0.05
+  elitism: 2
+  early_stopping:
+    patience: 0
+    min_delta: 0.0
+
+daga:
+  k_start: 10
+  TSV: 0.25
+  Ts: 3
+  epsilon: 0.5
+  k_max: 250

@@ -1,0 +1,22 @@
+sweep_name: dagasvm_smallsample_6
+num_trials: 6
+max_parallel: 3
+selection_seed: 43
+objective:
+  name: full_validation_f1
+  mode: max
+search_space:
+  algorithm_mode: [dagasvm]
+  fitness.metric: [f1]
+  fitness.class_imbalance_penalty: [0.0]
+  svm.kernel: [rbf]
+  svm.C: [10.0]
+  svm.gamma: [0.12, 0.15]
+  ga.population_size: [24]
+  ga.generations: [12]
+  ga.mutation_rate: [0.05]
+  val_ga.subset_fraction: [0.10]
+  k_schedule.num_cycles: [2]
+  k_schedule.k_start: [600, 750, 1000]
+  k_schedule.k_multiplier: [1.5]
+  val_cumulation.initial_fraction: [0.15]

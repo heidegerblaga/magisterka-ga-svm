@@ -1,0 +1,59 @@
+seeds:
+- 42
+- 43
+- 44
+- 45
+- 46
+- 47
+- 48
+- 49
+- 50
+- 51
+- 52
+- 53
+- 54
+- 55
+- 56
+- 57
+- 58
+- 59
+- 60
+- 61
+datasets:
+  chessboard:
+    label: Szachownica
+  moons:
+    label: Moons
+  circles:
+    label: Circles
+  spiral:
+    label: Spiral
+  classification2d:
+    label: Classification 2D
+  digits:
+    label: Digits (64 cechy)
+  magic:
+    label: MAGIC Gamma (UCI)
+variants:
+  evo_mem:
+    selection: evolutionary
+    memory: true
+    mode: growing
+  evo_nomem:
+    selection: evolutionary
+    memory: false
+    mode: growing
+  rand_fixed:
+    selection: random
+    memory: true
+    mode: fixed
+    fixed_size: null
+  rand_growth:
+    selection: random
+    memory: true
+    mode: growing
+  heur_mem:
+    selection: heuristic
+    memory: true
+    mode: growing
+fixed_size_source_variant: evo_mem

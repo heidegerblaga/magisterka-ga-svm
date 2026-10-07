@@ -1,0 +1,40 @@
+seed: 42
+experiment_name: "chessboard_gasvm_k010_g120"
+dataset_name: "Chessboard"
+algorithm_mode: "gasvm"
+
+data:
+  train_csv: "data/raw/train.csv"
+  validation_csv: "data/raw/validation.csv"
+  test_csv: "data/raw/test.csv"
+  target: "label"
+  stratify: true
+  header: false
+  target_candidates: ["target", "y", "class"]
+  max_rows: 0
+
+svm:
+  kernel: "rbf"
+  C: 10.0
+  gamma: 0.002
+  class_weight: "balanced"
+  probability: false
+  standardize: false
+
+encoding:
+  k_per_class: 10
+
+fitness:
+  metric: balanced_accuracy
+  class_imbalance_penalty: 0.0
+
+ga:
+  population_size: 30
+  generations: 120
+  tournament_k: 3
+  crossover_rate: 0.8
+  mutation_rate: 0.05
+  elitism: 2
+  early_stopping:
+    patience: 0
+    min_delta: 0.0

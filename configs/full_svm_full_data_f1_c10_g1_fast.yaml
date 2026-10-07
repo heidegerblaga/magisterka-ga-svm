@@ -1,0 +1,25 @@
+algorithm_mode: full_svm
+data:
+  header: null
+  stratify: true
+  target: label
+  target_candidates:
+  - target
+  - y
+  - class
+  test_csv: data/raw/test.csv
+  train_csv: data/raw/train.csv
+  validation_csv: data/raw/validation.csv
+  max_rows: null
+dataset_name: baseline_ga_svm
+experiment_name: full_svm_full_data_f1_c10_g1_fast
+fitness:
+  class_imbalance_penalty: 0.0
+  metric: f1
+seed: 42
+svm:
+  C: 10.0
+  class_weight: balanced
+  gamma: 1.0
+  kernel: rbf
+  probability: false

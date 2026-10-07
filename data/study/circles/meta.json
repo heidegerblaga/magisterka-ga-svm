@@ -1,0 +1,53 @@
+{
+  "name": "circles",
+  "features": 2,
+  "generator_seed": 2026,
+  "split_seed": 2026,
+  "split_fractions_train_val_test": [
+    0.4,
+    0.4,
+    0.2
+  ],
+  "splits": {
+    "train": {
+      "rows": 4800,
+      "class_counts": {
+        "0": 2400,
+        "1": 2400
+      },
+      "class_proportions": {
+        "0": 0.5,
+        "1": 0.5
+      }
+    },
+    "validation": {
+      "rows": 4800,
+      "class_counts": {
+        "0": 2400,
+        "1": 2400
+      },
+      "class_proportions": {
+        "0": 0.5,
+        "1": 0.5
+      }
+    },
+    "test": {
+      "rows": 2400,
+      "class_counts": {
+        "0": 1200,
+        "1": 1200
+      },
+      "class_proportions": {
+        "0": 0.5,
+        "1": 0.5
+      }
+    }
+  },
+  "scaler": null,
+  "generator": "sklearn.datasets.make_circles",
+  "params": {
+    "n_samples": 12000,
+    "noise": 0.12,
+    "factor": 0.5
+  }
+}

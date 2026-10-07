@@ -1,0 +1,51 @@
+algorithm_mode: gasvm
+data:
+  header: null
+  stratify: true
+  target: label
+  target_candidates:
+  - target
+  - y
+  - class
+  test_csv: data/raw/test.csv
+  train_csv: data/raw/train.csv
+  validation_csv: data/raw/validation.csv
+  max_rows: null
+dataset_name: baseline_ga_svm
+encoding:
+  k_per_class: 50
+experiment_name: baseline_ga_svm_fullsearch_probe
+fitness:
+  class_imbalance_penalty: 0.0
+  metric: f1
+ga:
+  crossover_rate: 0.8
+  early_stopping:
+    min_delta: 0.001
+    patience: 5
+  elitism: 2
+  generations: 20
+  mutation_rate: 0.08
+  population_size: 80
+  tournament_k: 3
+k_schedule:
+  k_multiplier: 1.5
+  k_start: 40
+  num_cycles: 3
+seed: 42
+svm:
+  C: 10.0
+  class_weight: balanced
+  gamma: 1.0
+  kernel: rbf
+val_ga:
+  crossover_rate: 0.8
+  early_stopping:
+    min_delta: 0.001
+    patience: 5
+  elitism: 2
+  generations: 20
+  mutation_rate: 0.05
+  population_size: 40
+  subset_fraction: 0.5
+  tournament_k: 3

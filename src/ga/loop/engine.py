@@ -45,6 +45,22 @@ class GAConfig:
     constraints: Constraints = field(default_factory=Constraints)
     early_stopping: EarlyStopping = field(default_factory=EarlyStopping)
 
+
+def build_ga_config(section: dict) -> GAConfig:
+    """Buduje GAConfig z sekcji YAML (``ga`` / ``val_ga``); brakujące pola dostają wartości domyślne."""
+    gcfg = GAConfig(
+        population_size=section.get("population_size", 60),
+        generations=section.get("generations", 20),
+        tournament_k=section.get("tournament_k", 3),
+        crossover_rate=section.get("crossover_rate", 0.8),
+        mutation_rate=section.get("mutation_rate", 0.05),
+        elitism=section.get("elitism", 2),
+        early_stopping=section.get("early_stopping", {"patience": 0, "min_delta": 0.0}),
+    )
+    if isinstance(gcfg.early_stopping, dict):
+        gcfg.early_stopping = EarlyStopping(**gcfg.early_stopping)
+    return gcfg
+
 # --- Selekcja / krzyżowanie / mutacja ---
 
 def _tournament_select(scores: np.ndarray, k: int, rng: np.random.Generator) -> int:
@@ -167,12 +183,22 @@ def _uniform_crossover(p1: np.ndarray, p2: np.ndarray, rng: np.random.Generator)
 
 def _evaluate_population_k(
     pop: np.ndarray, X_pool: np.ndarray, y_pool: np.ndarray, X_val: np.ndarray, y_val: np.ndarray,
-    svm_cfg: SVMConfig, fcfg: FitnessConfig
-) -> np.ndarray:
+    svm_cfg: SVMConfig, fcfg: FitnessConfig,
+    *,
+    return_meta: bool = False,
+) -> tuple[np.ndarray, list[dict] | None]:
     scores = np.empty(pop.shape[0], dtype=float)
+    metas: list[dict] | None = [] if return_meta else None
     for i, train_mask in enumerate(pop):
-        scores[i] = evaluate_individual_fixed_train(train_mask, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg)
-    return scores
+        if return_meta:
+            score, meta = evaluate_individual_fixed_train(
+                train_mask, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg, return_meta=True
+            )
+            scores[i] = float(score)
+            metas.append(meta)
+        else:
+            scores[i] = evaluate_individual_fixed_train(train_mask, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg)
+    return scores, metas
 
 def run_ga_k_per_class(
     X_pool: np.ndarray, y_pool: np.ndarray,    # to jest pula, z której wybieramy k/klasę -> TRAIN
@@ -189,9 +215,19 @@ def run_ga_k_per_class(
     """
     rng = np.random.default_rng(seed)
 
-    # inicjalizacja populacji
-    pop = np.stack([init_k_per_class(y_pool, kcfg) for _ in range(gcfg.population_size)], axis=0)
-    scores = _evaluate_population_k(pop, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg)
+    # Każdy osobnik musi mieć inny seed startowy, inaczej populacja początkowa
+    # składa się z identycznych masek i GA traci realną różnorodność.
+    pop = np.stack(
+        [
+            init_k_per_class(
+                y_pool,
+                KPerClassConfig(k_per_class=kcfg.k_per_class, random_state=seed + i),
+            )
+            for i in range(gcfg.population_size)
+        ],
+        axis=0,
+    )
+    scores, _ = _evaluate_population_k(pop, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg)
 
     best_idx = int(np.argmax(scores))
     best_score = float(scores[best_idx])
@@ -227,7 +263,7 @@ def run_ga_k_per_class(
             new_pop.extend([c1, c2])
 
         pop = np.stack(new_pop[:gcfg.population_size], axis=0)
-        scores = _evaluate_population_k(pop, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg)
+        scores, _ = _evaluate_population_k(pop, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg)
 
         gen_best = float(scores.max())
         history.append(gen_best)
@@ -244,6 +280,365 @@ def run_ga_k_per_class(
                 break
 
     return np.array(history, dtype=float), best_mask
+
+
+def run_ga_k_per_class_with_trace(
+    X_pool: np.ndarray,
+    y_pool: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    kcfg: KPerClassConfig,
+    svm_cfg: SVMConfig,
+    fcfg: FitnessConfig,
+    gcfg: GAConfig,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray, list[dict], np.ndarray]:
+    """Wariant GASVM: zwraca też trace per generacja + najlepsze maski w generacjach."""
+    rng = np.random.default_rng(seed)
+
+    pop = np.stack(
+        [
+            init_k_per_class(
+                y_pool,
+                KPerClassConfig(k_per_class=kcfg.k_per_class, random_state=seed + i),
+            )
+            for i in range(gcfg.population_size)
+        ],
+        axis=0,
+    )
+    scores, metas = _evaluate_population_k(
+        pop, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg, return_meta=True
+    )
+
+    best_idx = int(np.argmax(scores))
+    best_score = float(scores[best_idx])
+    best_mask = pop[best_idx].copy()
+
+    history = [best_score]
+    trace: list[dict] = []
+    best_masks_per_generation: list[np.ndarray] = []
+    no_improve = 0
+
+    def sv_ratio(meta: dict) -> float | None:
+        training_rows = int(meta.get("training_rows", 0) or 0)
+        sv_count = int(meta.get("num_support_vectors", 0) or 0)
+        return None if training_rows <= 0 else float(sv_count / training_rows)
+
+    for gen in range(gcfg.generations):
+        new_pop = []
+        elite_idx = np.argsort(scores)[-gcfg.elitism:]
+        for ei in elite_idx:
+            new_pop.append(pop[int(ei)].copy())
+
+        while len(new_pop) < gcfg.population_size:
+            p1 = pop[_tournament_select(scores, gcfg.tournament_k, rng)]
+            p2 = pop[_tournament_select(scores, gcfg.tournament_k, rng)]
+
+            if rng.random() < gcfg.crossover_rate:
+                c1, c2 = _uniform_crossover(p1, p2, rng)
+                c1 = repair_to_k_per_class(c1, y_pool, kcfg.k_per_class, rng)
+                c2 = repair_to_k_per_class(c2, y_pool, kcfg.k_per_class, rng)
+            else:
+                c1, c2 = p1.copy(), p2.copy()
+
+            c1 = mutate_k_per_class(c1, y_pool, gcfg.mutation_rate, rng, kcfg.k_per_class)
+            c2 = mutate_k_per_class(c2, y_pool, gcfg.mutation_rate, rng, kcfg.k_per_class)
+
+            new_pop.extend([c1, c2])
+
+        pop = np.stack(new_pop[: gcfg.population_size], axis=0)
+        scores, metas = _evaluate_population_k(
+            pop, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg, return_meta=True
+        )
+
+        gen_best_idx = int(np.argmax(scores))
+        gen_best = float(scores[gen_best_idx])
+        gen_mean = float(scores.mean())
+        history.append(gen_best)
+        best_masks_per_generation.append(pop[gen_best_idx].copy())
+
+        gen_meta = (metas or [])[gen_best_idx] if metas else {}
+        sv_counts = [int(m.get("num_support_vectors", 0)) for m in (metas or [])]
+        trace.append(
+            {
+                "generation": gen + 1,
+                "k_per_class": int(kcfg.k_per_class),
+                "best_fitness": float(gen_best),
+                "mean_fitness": float(gen_mean),
+                "global_best_fitness": float(best_score),
+                "best_num_support_vectors": int(gen_meta.get("num_support_vectors", 0) or 0),
+                "mean_num_support_vectors": float(np.mean(sv_counts)) if sv_counts else None,
+                "best_sv_ratio": sv_ratio(gen_meta),
+            }
+        )
+
+        if gen_best > best_score + gcfg.early_stopping.min_delta:
+            best_score = gen_best
+            best_mask = pop[gen_best_idx].copy()
+            no_improve = 0
+        else:
+            no_improve += 1
+            if gcfg.early_stopping.patience and no_improve >= gcfg.early_stopping.patience:
+                break
+
+    return (
+        np.array(history, dtype=float),
+        best_mask,
+        trace,
+        np.stack(best_masks_per_generation, axis=0)
+        if best_masks_per_generation
+        else np.zeros((0, X_pool.shape[0]), dtype=bool),
+    )
+
+
+@dataclass
+class DagaKAdaptationConfig:
+    """Uproszczona implementacja adaptacji K wg schematu z DAGASVM/MASVM.
+
+    Nazewnictwo jak w pseudokodzie:
+      - TSV: próg na ρ_SV = s / t' (udział SV w wybranym TRAIN)
+      - Ts: minimalna liczba generacji bez zwiększania K
+      - cs: licznik stabilnego rozmiaru chromosomu (wewnętrzny stan)
+      - ε: współczynnik selekcji LGA (local-global adaptation)
+    """
+
+    k_start: int = 10
+    TSV: float = 0.25
+    Ts: int = 3
+    epsilon: float = 0.5
+    k_max: int | None = None
+
+
+def _lga_parent_indices(
+    scores: np.ndarray,
+    tournament_k: int,
+    rng: np.random.Generator,
+    *,
+    mode: str,
+    epsilon: float,
+) -> tuple[int, int]:
+    """Dobiera parę rodziców wg LGA (local/global)."""
+    n = int(scores.shape[0])
+    if n < 2:
+        return 0, 0
+
+    epsilon = float(np.clip(epsilon, 0.0, 1.0))
+    split = int(round(epsilon * n))
+    split = min(max(split, 1), n - 1)
+    order = np.argsort(scores)
+    fit_idx = order[-split:]
+    weak_idx = order[: n - split]
+
+    def tournament(indices: np.ndarray) -> int:
+        if indices.size == 1:
+            return int(indices[0])
+        k = min(int(tournament_k), int(indices.size))
+        cand = rng.choice(indices, size=k, replace=False)
+        return int(cand[np.argmax(scores[cand])])
+
+    if mode == "global":
+        return tournament(fit_idx), tournament(weak_idx)
+
+    # local: eksploruj obie połówki niezależnie
+    # (pierwszy rodzic z tej samej części co drugi)
+    if rng.random() < epsilon:
+        return tournament(fit_idx), tournament(fit_idx)
+    return tournament(weak_idx), tournament(weak_idx)
+
+
+def run_daga_k_per_class(
+    *,
+    X_pool: np.ndarray,
+    y_pool: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    kcfg: KPerClassConfig,
+    daca: DagaKAdaptationConfig,
+    svm_cfg: SVMConfig,
+    fcfg: FitnessConfig,
+    gcfg: GAConfig,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray, list[dict], np.ndarray]:
+    """GA z adaptacją K (DAGASVM): start od małego K i adaptacyjne zwiększanie.
+
+    Zwraca:
+      - history_best: najlepszy fitness w kolejnych generacjach
+      - best_mask: najlepsza maska TRAIN (True => wchodzi do TRAIN)
+      - trace: lista słowników z metrykami per generacja (K, ρ_SV, itp.)
+      - best_masks_per_generation: tablica bool (G x |pool|) z najlepszym osobnikiem w generacji
+    """
+    rng = np.random.default_rng(seed)
+
+    # K może się zmieniać w trakcie, ale chromosomy są maskami nad X_pool.
+    current_k_float = float(max(1, int(daca.k_start or kcfg.k_per_class)))
+    k_cap = None
+    if daca.k_max is not None:
+        k_cap = int(daca.k_max)
+    else:
+        # twardy cap: najmniejsza klasa w puli
+        _, counts = np.unique(np.asarray(y_pool), return_counts=True)
+        k_cap = int(counts.min())
+
+    lga_mode = "local"
+    cs = 0  # stable chromosome size counter
+
+    def k_int() -> int:
+        value = int(np.ceil(current_k_float))
+        value = max(1, value)
+        return min(value, k_cap)
+
+    # inicjalizacja populacji dla startowego K
+    pop = np.stack(
+        [
+            init_k_per_class(
+                y_pool,
+                KPerClassConfig(k_per_class=k_int(), random_state=seed + i),
+            )
+            for i in range(gcfg.population_size)
+        ],
+        axis=0,
+    )
+    scores, metas = _evaluate_population_k(
+        pop, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg, return_meta=True
+    )
+
+    best_idx = int(np.argmax(scores))
+    best_score = float(scores[best_idx])
+    best_mask = pop[best_idx].copy()
+    best_meta = (metas or [])[best_idx] if metas else {}
+
+    eta_B = best_score
+    eta_I = best_score  # best fitness at last K increase
+    eta_P = best_score  # previous best fitness (for ΔR)
+
+    history = [best_score]
+    trace: list[dict] = []
+    best_masks_per_generation: list[np.ndarray] = []
+
+    def sv_ratio_from_meta(meta: dict) -> float | None:
+        training_rows = int(meta.get("training_rows", 0) or 0)
+        sv_count = int(meta.get("num_support_vectors", 0) or 0)
+        return None if training_rows <= 0 else float(sv_count / training_rows)
+
+    # generacje
+    for gen in range(gcfg.generations):
+        # elityzm
+        new_pop = []
+        elite_idx = np.argsort(scores)[-gcfg.elitism:]
+        for ei in elite_idx:
+            new_pop.append(pop[int(ei)].copy())
+
+        # reprodukcja (LGA zamiast zwykłej selekcji)
+        while len(new_pop) < gcfg.population_size:
+            p1_idx, p2_idx = _lga_parent_indices(
+                scores,
+                gcfg.tournament_k,
+                rng,
+                mode=lga_mode,
+                epsilon=daca.epsilon,
+            )
+            p1 = pop[p1_idx]
+            p2 = pop[p2_idx]
+
+            if rng.random() < gcfg.crossover_rate:
+                c1, c2 = _uniform_crossover(p1, p2, rng)
+            else:
+                c1, c2 = p1.copy(), p2.copy()
+
+            # naprawa do aktualnego K
+            kk = k_int()
+            c1 = repair_to_k_per_class(c1, y_pool, kk, rng)
+            c2 = repair_to_k_per_class(c2, y_pool, kk, rng)
+
+            # mutacja + naprawa
+            c1 = mutate_k_per_class(c1, y_pool, gcfg.mutation_rate, rng, kk)
+            c2 = mutate_k_per_class(c2, y_pool, gcfg.mutation_rate, rng, kk)
+
+            new_pop.extend([c1, c2])
+
+        pop = np.stack(new_pop[: gcfg.population_size], axis=0)
+        scores, metas = _evaluate_population_k(
+            pop, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg, return_meta=True
+        )
+
+        gen_best_idx = int(np.argmax(scores))
+        gen_best = float(scores[gen_best_idx])
+        gen_mean = float(scores.mean())
+        history.append(gen_best)
+        best_masks_per_generation.append(pop[gen_best_idx].copy())
+
+        # aktualizacja globalnego best
+        if gen_best > best_score + gcfg.early_stopping.min_delta:
+            best_score = gen_best
+            best_mask = pop[gen_best_idx].copy()
+            best_meta = (metas or [])[gen_best_idx] if metas else {}
+            eta_B = best_score
+
+        # trace
+        sv_counts = [int(m.get("num_support_vectors", 0)) for m in (metas or [])]
+        mean_sv = float(np.mean(sv_counts)) if sv_counts else None
+        best_sv = int(best_meta.get("num_support_vectors", 0) or 0)
+        best_sv_ratio = sv_ratio_from_meta(best_meta)
+        trace.append(
+            {
+                "generation": gen + 1,
+                "k_per_class": int(k_int()),
+                "lga_mode": lga_mode,
+                "cs": int(cs),
+                "best_fitness": float(gen_best),
+                "mean_fitness": float(gen_mean),
+                "global_best_fitness": float(best_score),
+                "best_num_support_vectors": int(best_sv),
+                "mean_num_support_vectors": mean_sv,
+                "best_sv_ratio": best_sv_ratio,
+            }
+        )
+
+        # --- Adaptacja K wg pseudokodu ---
+        delta_T = float(eta_B - eta_I)
+        delta_R = float(eta_B - eta_P)
+        best_sv_ratio_now = best_sv_ratio
+
+        should_skip_k_increase = (
+            (cs < int(daca.Ts))
+            or (delta_T == 0.0)
+            or (delta_R >= 0.5 * delta_T if delta_T != 0.0 else True)
+            or (best_sv_ratio_now is not None and best_sv_ratio_now < float(daca.TSV))
+        )
+
+        if should_skip_k_increase:
+            cs += 1
+        else:
+            if lga_mode == "local":
+                lga_mode = "global"
+            else:
+                # δK ← 1 + |ρSV(pB) − TSV| / (1 − TSV)
+                rho = float(best_sv_ratio_now if best_sv_ratio_now is not None else 1.0)
+                tsv = float(np.clip(daca.TSV, 0.0, 0.999999))
+                delta_K = 1.0 + abs(rho - tsv) / (1.0 - tsv)
+                prev_k = k_int()
+                current_k_float = float(current_k_float * delta_K)
+                if k_int() <= prev_k and prev_k < k_cap:
+                    current_k_float = float(prev_k + 1)
+
+                # po zwiększeniu K: ηI ← ηB; cs ← 0; LGA -> local
+                eta_I = eta_B
+                cs = 0
+                lga_mode = "local"
+
+                # dopasuj populację do nowego K (bez pełnej regeneracji)
+                kk = k_int()
+                for i in range(pop.shape[0]):
+                    pop[i] = repair_to_k_per_class(pop[i], y_pool, kk, rng)
+
+        eta_P = eta_B
+
+    return (
+        np.array(history, dtype=float),
+        best_mask,
+        trace,
+        np.stack(best_masks_per_generation, axis=0) if best_masks_per_generation else np.zeros((0, X_pool.shape[0]), dtype=bool),
+    )
 
 from dataclasses import dataclass
 from sklearn.metrics import balanced_accuracy_score, accuracy_score, f1_score
@@ -294,21 +689,33 @@ def _evaluate_population_val(
     y_val: np.ndarray,
     clf,
     metric: str,
+    preds: np.ndarray | None = None,
+    counter: dict | None = None,
 ) -> np.ndarray:
     """
     Ewaluacja populacji Val-GA:
       - dla każdej maski wybieramy podzbiór walidacji
       - liczmy METRYKĘ ustalonego SVM na tym podzbiorze
       - fitness = 1 - metric  (adwersarialnie: im gorzej, tym lepiej)
+
+    `preds` (opcjonalnie): predykcje ustalonego modelu dla CAŁEJ puli kandydatów,
+    policzone raz. Model jest stały w trakcie Val-GA, więc `preds[mask]` jest
+    identyczne z `clf.predict(X_val[mask])` — wynik się nie zmienia, znika tylko
+    wielokrotne wołanie modelu. `counter["model_predictions"]` zlicza liczbę
+    predykcji modelu (koszt obliczeniowy doboru V').
     """
     scores = np.empty(pop.shape[0], dtype=float)
     for i, mask in enumerate(pop):
         if not np.any(mask):
             scores[i] = 0.0
             continue
-        X_sub = X_val[mask]
         y_sub = y_val[mask]
-        pred = clf.predict(X_sub)
+        if preds is not None:
+            pred = preds[mask]
+        else:
+            pred = clf.predict(X_val[mask])
+            if counter is not None:
+                counter["model_predictions"] = counter.get("model_predictions", 0) + int(mask.sum())
         m = _metric_from_preds(y_sub, pred, metric)
         scores[i] = 1.0 - m  # im gorsza metryka, tym większy fitness
     return scores
@@ -322,6 +729,9 @@ def run_val_ga(
     gcfg: GAConfig,
     metric: str = "balanced_accuracy",
     seed: int = 42,
+    preds: np.ndarray | None = None,
+    counter: dict | None = None,
+    verbose: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Drugi GA (Val-GA): szuka podzbioru walidacji, który MAKSYMALNIE PSUJE wynik ustalonego SVM.
@@ -336,7 +746,7 @@ def run_val_ga(
 
     # inicjalna populacja masek walidacji
     pop = np.stack([_init_val_mask(n, vcfg, rng) for _ in range(gcfg.population_size)], axis=0)
-    scores = _evaluate_population_val(pop, X_val, y_val, clf, metric)
+    scores = _evaluate_population_val(pop, X_val, y_val, clf, metric, preds, counter)
 
     best_idx = int(np.argmax(scores))
     best_score = float(scores[best_idx])
@@ -375,7 +785,7 @@ def run_val_ga(
             new_pop.extend([c1, c2])
 
         pop = np.stack(new_pop[:gcfg.population_size], axis=0)
-        scores = _evaluate_population_val(pop, X_val, y_val, clf, metric)
+        scores = _evaluate_population_val(pop, X_val, y_val, clf, metric, preds, counter)
 
         gen_best = float(scores.max())
         history.append(gen_best)
@@ -386,11 +796,12 @@ def run_val_ga(
         gen_worst = float(scores.min())
         gen_var = float(scores.var())
 
-        print(
-            f"[VAL-GA GEN {gen + 1:03d}/{gcfg.generations}] "
-            f"best={gen_best:.4f}, mean={gen_mean:.4f}, worst={gen_worst:.4f}, var={gen_var:.6f}, "
-            f"global_best={best_score:.4f}"
-        )
+        if verbose:
+            print(
+                f"[VAL-GA GEN {gen + 1:03d}/{gcfg.generations}] "
+                f"best={gen_best:.4f}, mean={gen_mean:.4f}, worst={gen_worst:.4f}, var={gen_var:.6f}, "
+                f"global_best={best_score:.4f}"
+            )
 
         if gen_best > best_score + gcfg.early_stopping.min_delta:
             best_score = gen_best

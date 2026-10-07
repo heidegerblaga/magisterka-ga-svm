@@ -40,17 +40,40 @@ def evaluate_individual_fixed_train(
     train_mask: np.ndarray,
     X_pool: np.ndarray, y_pool: np.ndarray,
     X_val: np.ndarray,  y_val: np.ndarray,
-    svm_cfg: SVMConfig, fcfg: FitnessConfig
-) -> float:
+    svm_cfg: SVMConfig, fcfg: FitnessConfig,
+    *,
+    return_meta: bool = False,
+) -> float | tuple[float, dict]:
     """
     Ocena osobnika: TRAIN = X_pool[train_mask], VAL = stałe (X_val, y_val).
     """
     X_tr = X_pool[train_mask]
     y_tr = y_pool[train_mask]
     if len(np.unique(y_tr)) < 2 or len(np.unique(y_val)) < 2:
+        if return_meta:
+            return 0.0, {
+                "training_rows": int(X_tr.shape[0]),
+                "num_support_vectors": 0,
+                "sv_ratio": None,
+                "fit_time": 0.0,
+                "score_time": 0.0,
+            }
         return 0.0
 
-    base = train_eval_svm(X_tr, y_tr, X_val, y_val, svm_cfg, metric=fcfg.metric)
+    res = train_eval_svm(
+        X_tr,
+        y_tr,
+        X_val,
+        y_val,
+        svm_cfg,
+        metric=fcfg.metric,
+        return_dict=True,
+        all_metrics=False,  # w pętli GA potrzebna jest tylko wartość fitnessu
+    )
+    base = float(res["metric"])
+    sv_count = int(res.get("num_support_vectors", 0))
+    training_rows = int(X_tr.shape[0])
+    sv_ratio = (sv_count / training_rows) if training_rows else None
 
     if fcfg.class_imbalance_penalty > 0.0:
         def imb(y):
@@ -62,5 +85,13 @@ def evaluate_individual_fixed_train(
         penalty = fcfg.class_imbalance_penalty * imb(y_tr)
         base = max(0.0, base * (1.0 - penalty))
 
-    return float(base)
+    if return_meta:
+        return float(base), {
+            "training_rows": training_rows,
+            "num_support_vectors": sv_count,
+            "sv_ratio": sv_ratio,
+            "fit_time": float(res.get("fit_time", 0.0)),
+            "score_time": float(res.get("score_time", 0.0)),
+        }
 
+    return float(base)

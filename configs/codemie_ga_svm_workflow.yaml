@@ -1,0 +1,20 @@
+name: GA-SVM Experiment Analyst
+description: Analyze GA-SVM runs and recommend the next most promising configurations.
+tasks:
+  - name: analyze_latest_results
+    type: llm
+    config:
+      model: __AUTO__
+      prompt: |
+        You are reviewing GA-SVM experiment results for a master's thesis project.
+
+        User input:
+        {{user_input}}
+
+        Produce:
+        1. the best current configuration and why it works,
+        2. patterns that consistently help or hurt,
+        3. the next 3 configurations worth running,
+        4. risks or assumptions that should be checked before trusting the result.
+
+        Keep the answer concrete and configuration-focused.

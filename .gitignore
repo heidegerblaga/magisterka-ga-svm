@@ -10,9 +10,15 @@ venv/
 
 # OS
 .DS_Store
+.vscode/
 
 # Project artifacts
 artifacts/
+.codex-build/
+output/
+outputs/
+results/
+tmp/
 *.log
 
 # Data (keep only small samples tracked)
