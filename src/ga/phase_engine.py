@@ -16,6 +16,19 @@ K (``k_per_class``) jest stałe podczas pojedynczego cyklu optymalizacji T'. Dec
 ``increase_k`` zapada co najwyżej raz na cykl (wymuszone asercją). Gdy aktualne T' osiąga
 próg ``perfect_val_threshold`` na V', K NIE rośnie — algorytm najpierw utrudnia V',
 a gdy V' było już utrudnione dla tego K — kończy.
+
+REGUŁA STOPU „BA(V') = 1,0” (parametry ``daga.min_vprime_per_class`` i ``daga.perfect_recheck_expansions``)
+---------------------------------------------------------------------------------------------------------
+Reguła historyczna: BA(V') >= próg => jedno „utwardzenie” V' (rozszerzenie), potem stop.
+Reguła rozszerzona (BA(V') >= próg zatrzymuje algorytm dopiero, gdy spełnione są OBA warunki):
+  (1) V' ma co najmniej ``min_vprime_per_class`` próbek w KAŻDEJ klasie (przy mniejszej liczbie wymaganej
+      od najmniejszej klasy w V — liczba ta, bo inaczej warunek byłby nie do spełnienia),
+  (2) po osiągnięciu minimalnego rozmiaru wykonano co najmniej ``perfect_recheck_expansions`` obowiązkowych
+      rozszerzeń V' i ponowną optymalizację/ocenę T' na rozszerzonym V' (licznik jest per-K, jak „utwardzenie”).
+Gdy któryś warunek nie jest spełniony, a V' można rozszerzyć, wykonywane jest rozszerzenie (z K bez zmian);
+gdy nie można (brak kandydatów) — stop ``stop_no_validation_candidates``. BA(V') = 1,0 NIGDY nie zwiększa K.
+Domyślnie (0, 0) reguła jest identyczna z historyczną. Dla V' stałego (``mode=fixed``) warunki nie mają
+zastosowania, bo V' z założenia nie rośnie.
 """
 from __future__ import annotations
 
@@ -59,6 +72,16 @@ STOP_DECISIONS = {
     "stop_no_growth_signal",
     "stop_max_cycles",
 }
+# Kategorie przyczyn zakończenia (kolumna ``stop_category``; łączy kody decyzji z pętli i bezpieczniki)
+STOP_CATEGORY = {
+    "stop_perfect_on_current_val": "perfect_ba",
+    "stop_no_growth_signal": "no_k_growth_signal",
+    "stop_no_k_growth": "k_limit",
+    "stop_k_class_cap": "k_limit",
+    "stop_no_validation_candidates": "no_candidates",
+    "stop_no_new_vprime_elements": "no_candidates",
+    "stop_max_cycles": "max_cycles",
+}
 
 
 @dataclass
@@ -74,6 +97,10 @@ class PhaseSettings:
     vprime: VPrimeConfig
     observe_full_validation: bool
     observe_test: bool
+    # --- rozszerzona reguła stopu BA(V') = 1,0 (domyślnie 0/0/0 = reguła historyczna) ---
+    min_vprime_per_class: int = 0
+    perfect_recheck_expansions: int = 0
+    perfect_recheck_min_add_per_class: int = 0
 
 
 def parse_phase_settings(cfg: dict) -> PhaseSettings:
@@ -94,8 +121,17 @@ def parse_phase_settings(cfg: dict) -> PhaseSettings:
         mode=str(vp.get("mode", "growing")),
         fixed_size=None if vp.get("fixed_size") is None else int(vp["fixed_size"]),
         score_candidate_pool=bool(vp.get("score_candidate_pool", True)),
+        pool_budget_factor=None if vp.get("pool_budget_factor") is None else float(vp["pool_budget_factor"]),
     )
     obs = cfg.get("observation", {}) or {}
+    min_vp = int(daga_cfg.get("min_vprime_per_class", 0))
+    n_recheck = int(daga_cfg.get("perfect_recheck_expansions", 0))
+    recheck_add = int(daga_cfg.get("perfect_recheck_min_add_per_class", 0))
+    if min_vp < 0 or n_recheck < 0 or recheck_add < 0:
+        raise ValueError(
+            "daga.min_vprime_per_class, daga.perfect_recheck_expansions i daga.perfect_recheck_min_add_per_class "
+            "muszą być nieujemne."
+        )
     return PhaseSettings(
         k_start=k_start,
         tsv=float(daga_cfg.get("TSV", daga_cfg.get("tsv", 0.25))),
@@ -110,6 +146,9 @@ def parse_phase_settings(cfg: dict) -> PhaseSettings:
         vprime=vprime,
         observe_full_validation=bool(obs.get("full_validation", True)),
         observe_test=bool(obs.get("test", True)),
+        min_vprime_per_class=min_vp,
+        perfect_recheck_expansions=n_recheck,
+        perfect_recheck_min_add_per_class=recheck_add,
     )
 
 
@@ -126,6 +165,12 @@ def next_k_from_sv_ratio(current_k: int, sv_ratio: float | None, tsv: float) -> 
 class CycleDecision:
     decision: str
     reason: str
+    # niepusty, gdy BA(V') >= próg i reguła historyczna zatrzymałaby algorytm, a rozszerzona reguła tego
+    # zabrania: "min_size", "recheck" albo "min_size+recheck"
+    blocked_by: str = ""
+    # niepusty, gdy BA(V') >= próg i któryś z warunków stopu jest jeszcze niespełniony (niezależnie od tego,
+    # czy reguła historyczna i tak by rozszerzyła V')
+    gate_pending: str = ""
 
     @property
     def expands_vprime(self) -> bool:
@@ -140,6 +185,27 @@ class CycleDecision:
         return self.decision in STOP_DECISIONS
 
 
+def perfect_stop_gate(
+    *,
+    vprime_mode: str,
+    min_vprime_size_reached: bool,
+    perfect_rechecks_done: int,
+    perfect_rechecks_required: int,
+) -> str:
+    """Zwraca listę niespełnionych warunków stopu BA(V')=1,0 ("min_size", "recheck", "min_size+recheck" lub "").
+
+    Dla V' stałego (``fixed``) warunki nie mają zastosowania: V' nie może zostać rozszerzone z definicji.
+    """
+    if vprime_mode == "fixed":
+        return ""
+    missing = []
+    if not min_vprime_size_reached:
+        missing.append("min_size")
+    if int(perfect_rechecks_done) < int(perfect_rechecks_required):
+        missing.append("recheck")
+    return "+".join(missing)
+
+
 def decide_cycle(
     *,
     perfect_on_current_val: bool,
@@ -150,18 +216,55 @@ def decide_cycle(
     sv_ratio_stable_since_hardening: bool,
     can_increase_k: bool,
     forced_growth_after_patience: bool = False,
+    min_vprime_size_reached: bool = True,
+    perfect_rechecks_done: int = 0,
+    perfect_rechecks_required: int = 0,
 ) -> CycleDecision:
     """Czysta funkcja decyzyjna cyklu. Argumenty zależą WYŁĄCZNIE od V', T' i puli kandydatów
-    (czy w ogóle istnieją jeszcze elementy do dodania) — nigdy od metryk pełnego V."""
+    (czy w ogóle istnieją jeszcze elementy do dodania) — nigdy od metryk pełnego V.
+
+    Trzy ostatnie argumenty opisują rozszerzoną regułę stopu BA(V')=1,0 (patrz docstring modułu); przy wartościach
+    domyślnych (rozmiar osiągnięty, 0 wymaganych ponownych sprawdzeń) funkcja jest tożsama z regułą historyczną."""
     if perfect_on_current_val:
-        if expansion_possible and not validation_hardened_for_current_k:
+        gate = perfect_stop_gate(
+            vprime_mode=vprime_mode,
+            min_vprime_size_reached=min_vprime_size_reached,
+            perfect_rechecks_done=perfect_rechecks_done,
+            perfect_rechecks_required=perfect_rechecks_required,
+        )
+        legacy_would_stop = not (expansion_possible and not validation_hardened_for_current_k)
+        if not gate:
+            # --- reguła historyczna (bez zmian) ---
+            if expansion_possible and not validation_hardened_for_current_k:
+                return CycleDecision(
+                    DECISION_EXPAND,
+                    "T' osiąga próg 100% na V'; K nie rośnie automatycznie — najpierw utrudniam V'",
+                )
+            return CycleDecision(
+                "stop_perfect_on_current_val",
+                "T' osiąga próg na V' mimo wcześniejszego utrudnienia V' (lub V' nie da się rozszerzyć); K bez zmian",
+            )
+        # --- rozszerzona reguła: warunek stopu niespełniony ---
+        blocked_by = gate if legacy_would_stop else ""
+        if expansion_possible:
+            if gate == "min_size":
+                why = "V' nie osiągnęło minimalnego rozmiaru"
+            elif gate == "recheck":
+                why = "brak obowiązkowego ponownego sprawdzenia po rozszerzeniu V'"
+            else:
+                why = "V' nie osiągnęło minimalnego rozmiaru i brak obowiązkowego ponownego sprawdzenia"
             return CycleDecision(
                 DECISION_EXPAND,
-                "T' osiąga próg 100% na V'; K nie rośnie automatycznie — najpierw utrudniam V'",
+                f"T' osiąga próg 100% na V', ale {why} — stop zablokowany; K nie rośnie, rozszerzam V'",
+                blocked_by=blocked_by,
+                gate_pending=gate,
             )
         return CycleDecision(
-            "stop_perfect_on_current_val",
-            "T' osiąga próg na V' mimo wcześniejszego utrudnienia V' (lub V' nie da się rozszerzyć); K bez zmian",
+            "stop_no_validation_candidates",
+            f"T' osiąga próg 100% na V', warunek stopu niespełniony ({gate}), ale V' nie da się już rozszerzyć "
+            "(brak kandydatów); K bez zmian",
+            blocked_by=blocked_by,
+            gate_pending=gate,
         )
     if not has_growth_signal:
         return CycleDecision(
@@ -249,6 +352,13 @@ def run_phase_experiment(
     n_classes = int(classes.size)
     train_class_cap = int(np.unique(y_train, return_counts=True)[1].min())
     n_val_full = int(X_val_full.shape[0])
+    # --- rozszerzona reguła stopu BA(V')=1,0: wymagany minimalny rozmiar V' (per klasa) ---
+    val_class_sizes = {c: int((y_val_full == c).sum()) for c in classes}
+    min_per_class_required = int(st.min_vprime_per_class)
+    min_per_class_effective = (
+        min(min_per_class_required, min(val_class_sizes.values())) if min_per_class_required > 0 else 0
+    )
+    min_size_required_total = int(min_per_class_effective * n_classes)
 
     # --- inicjalizacja V' ---
     rng = np.random.default_rng(seed)
@@ -283,6 +393,9 @@ def run_phase_experiment(
     stable_cycles_at_current_k = 0
     best_observed_full_val = -1.0  # wyłącznie raportowanie
     total_k_increases = 0
+    perfect_rechecks_done = 0  # obowiązkowe rozszerzenia V' wykonane po osiągnięciu minimum (licznik per-K)
+    perfect_rechecks_total = 0
+    min_size_first_reached_cycle: int | None = None
 
     metrics_dir = Path(artifact_layout["metrics"])
     checkpoints_dir = Path(artifact_layout["checkpoints"])
@@ -303,6 +416,11 @@ def run_phase_experiment(
         X_vp = X_val_full[vp_ids]
         y_vp = y_val_full[vp_ids]
         log.info("[cykl %s] rozmiar V': %s / %s próbek", cycle, vp_ids.size, n_val_full)
+        vp_min_class_count = int(min(int((y_vp == c).sum()) for c in classes))
+        min_size_reached = bool(vp_min_class_count >= min_per_class_effective)
+        if min_size_reached and min_size_first_reached_cycle is None:
+            min_size_first_reached_cycle = cycle
+        rechecks_done_at_decision = int(perfect_rechecks_done)
 
         kcfg = KPerClassConfig(k_per_class=int(current_k), random_state=seed + cycle - 1)
         gcfg_train = build_ga_config(cfg.get("ga", {}))
@@ -386,6 +504,9 @@ def run_phase_experiment(
             sv_ratio_stable_since_hardening=sv_ratio_stable_since_hardening,
             can_increase_k=candidate_next_k > prev_k,
             forced_growth_after_patience=forced_growth_after_patience,
+            min_vprime_size_reached=min_size_reached,
+            perfect_rechecks_done=rechecks_done_at_decision,
+            perfect_rechecks_required=int(st.perfect_recheck_expansions),
         )
         if cycle >= st.max_cycles and not decision.stops:
             decision = CycleDecision("stop_max_cycles", f"osiągnięto limit {st.max_cycles} cykli (zabezpieczenie)")
@@ -410,6 +531,13 @@ def run_phase_experiment(
         add_per_class = 0
         if decision.expands_vprime:
             add_per_class = max(1, candidate_add_per_class or 1)
+            if decision.gate_pending:
+                # rozszerzenie wymuszone warunkiem stopu BA(V')=1,0: dobij do minimum jednym krokiem albo wykonaj
+                # ponowne sprawdzenie na V' powiększonym o co najmniej zadany blok (nie o 1 próbkę na klasę)
+                if not min_size_reached:
+                    add_per_class = max(add_per_class, min_per_class_effective - vp_min_class_count)
+                else:
+                    add_per_class = max(add_per_class, int(st.perfect_recheck_min_add_per_class))
             log.info(
                 "FAZA V' (cykl %s, strategia=%s, pamięć=%s): dodanie %s próbek/klasę przy stałym K=%s",
                 cycle,
@@ -435,6 +563,7 @@ def run_phase_experiment(
                 rng=sel_rng,
                 counter=counter,
                 score_candidate_pool=vcfg.score_candidate_pool,
+                pool_budget_factor=vcfg.pool_budget_factor,
             )
         expanded_ok = bool(expansion is not None and expansion.n_new > 0)
         size_before = int(vp_ids.size)
@@ -468,6 +597,7 @@ def run_phase_experiment(
             adv_metric = float(
                 evaluate_fitted_svm(clf, X_val_full[selected_ids], y_val_full[selected_ids], metric=metric)["metric"]
             )
+            counter["diagnostic_scored_rows"] = counter.get("diagnostic_scored_rows", 0) + int(selected_ids.size)
             log.info(
                 "[V' cykl %s] przyrost: %s %s=%.4f (V' przed: %.4f), błędy modelu w przyroście: %s/%s",
                 cycle,
@@ -491,6 +621,9 @@ def run_phase_experiment(
         # ================= AKTUALIZACJA K / STANU FAZ =================
         if decision.expands_vprime and expanded_ok:
             current_k = prev_k
+            if decision.gate_pending and min_size_reached:
+                perfect_rechecks_done += 1  # obowiązkowe rozszerzenie po osiągnięciu minimalnego rozmiaru
+                perfect_rechecks_total += 1
             if not validation_hardened_before_cycle:
                 sv_ratio_at_hardening = best_sv_ratio
             validation_hardened_for_current_k = True
@@ -508,6 +641,7 @@ def run_phase_experiment(
             validation_hardened_for_current_k = False
             sv_ratio_at_hardening = None
             stable_cycles_at_current_k = 0
+            perfect_rechecks_done = 0  # jak „utwardzenie”: warunek dotyczy bieżącego K
             log.info(
                 "Przejście V' -> T': wzrost K %s -> %s (jedyny wzrost K w tym cyklu)%s",
                 prev_k,
@@ -566,6 +700,19 @@ def run_phase_experiment(
             "sv_ratio_stable_since_hardening": sv_ratio_stable_since_hardening,
             "stable_cycles_at_current_k": stable_cycles_at_current_k,
             "forced_growth_after_patience": forced_growth_after_patience,
+            "stop_rule": {
+                "min_vprime_per_class_required": min_per_class_required,
+                "min_vprime_per_class_effective": min_per_class_effective,
+                "min_vprime_size_required": min_size_required_total,
+                "vprime_min_class_count": vp_min_class_count,
+                "min_vprime_size_reached": min_size_reached,
+                "perfect_recheck_expansions_required": int(st.perfect_recheck_expansions),
+                "perfect_recheck_min_add_per_class": int(st.perfect_recheck_min_add_per_class),
+                "perfect_rechecks_done_at_decision": rechecks_done_at_decision,
+                "perfect_gate_pending": decision.gate_pending,
+                "perfect_stop_blocked": bool(decision.blocked_by),
+                "perfect_stop_blocked_reason": decision.blocked_by,
+            },
             "used_full_validation_for_control": False,
             "control_metrics_source": "V_prime",
             "observation_metrics_source": ["full_V", "test"],
@@ -648,6 +795,26 @@ def run_phase_experiment(
                     None if best_res_full_val is None else best_res_full_val["all"].get("accuracy")
                 ),
                 "control_model_predictions_cum": int(counter["model_predictions"]),
+                # --- reguła stopu BA(V')=1,0 ---
+                "min_vprime_per_class_required": min_per_class_required,
+                "min_vprime_size_required": min_size_required_total,
+                "vprime_min_class_count": vp_min_class_count,
+                "min_vprime_size_reached": min_size_reached,
+                "perfect_rechecks_required": int(st.perfect_recheck_expansions),
+                "perfect_rechecks_done": rechecks_done_at_decision,
+                "perfect_gate_pending": decision.gate_pending,
+                "perfect_stop_blocked": bool(decision.blocked_by),
+                "perfect_stop_blocked_reason": decision.blocked_by,
+                "stop_decision": None,
+                "stop_category": None,
+                # --- koszt doboru V' (faktyczne wiersze przekazane do modelu; patrz też val_ga_nominal_*) ---
+                "vprime_candidates": None if expansion is None else diag.get("n_candidates"),
+                "vprime_scored_pool": None if expansion is None else diag.get("n_scored_pool"),
+                "vprime_increment_rows": None if expansion is None else int(selected_ids.size),
+                "selection_predict_rows": None if expansion is None else diag.get("cost_selection_predict_rows"),
+                "selection_decision_rows": None if expansion is None else diag.get("cost_selection_decision_rows"),
+                "val_ga_nominal_subset_rows_scored": diag.get("val_ga_nominal_subset_rows_scored"),
+                "diagnostic_scored_rows": None if expansion is None else diag.get("cost_diagnostic_scored_rows"),
             }
         )
 
@@ -664,6 +831,12 @@ def run_phase_experiment(
             final_stop_decision = "stop_no_new_vprime_elements"
             log.info("STOP: zaplanowano rozszerzenie V', ale nie wybrano żadnych nowych próbek.")
             break
+
+    stop_category = STOP_CATEGORY.get(final_stop_decision, "other")
+    cycle_table_rows[-1]["stop_decision"] = final_stop_decision
+    cycle_table_rows[-1]["stop_category"] = stop_category
+    cycle_summaries[-1]["stop_decision"] = final_stop_decision
+    cycle_summaries[-1]["stop_category"] = stop_category
 
     final_mask_path = checkpoints_dir / "final_global_val_mask.npy"
     save_mask(final_mask_path, vset.mask())
@@ -711,8 +884,31 @@ def run_phase_experiment(
             "memory": bool(vcfg.memory),
             "mode": vcfg.mode,
             "fixed_size": vcfg.fixed_size,
+            "pool_budget_factor": vcfg.pool_budget_factor,
         },
         "stop_decision": final_stop_decision,
+        "stop_category": stop_category,
+        "stop_rule": {
+            "min_vprime_per_class_required": min_per_class_required,
+            "min_vprime_per_class_effective": min_per_class_effective,
+            "min_vprime_size_required": min_size_required_total,
+            "perfect_recheck_expansions_required": int(st.perfect_recheck_expansions),
+            "perfect_recheck_min_add_per_class": int(st.perfect_recheck_min_add_per_class),
+            "min_vprime_size_reached_at_end": bool(min_size_reached),
+            "min_vprime_size_first_reached_cycle": min_size_first_reached_cycle,
+            "perfect_rechecks_done_at_end": int(perfect_rechecks_done),
+            "perfect_rechecks_total": int(perfect_rechecks_total),
+            "perfect_stops_blocked_total": int(sum(1 for c in cycle_summaries if c["stop_rule"]["perfect_stop_blocked"])),
+            "perfect_gate_pending_cycles": int(sum(1 for c in cycle_summaries if c["stop_rule"]["perfect_gate_pending"])),
+            "perfect_stops_blocked_by_min_size": int(
+                sum(1 for c in cycle_summaries if "min_size" in c["stop_rule"]["perfect_stop_blocked_reason"])
+            ),
+            "perfect_stops_blocked_by_recheck": int(
+                sum(1 for c in cycle_summaries if "recheck" in c["stop_rule"]["perfect_stop_blocked_reason"])
+            ),
+            "perfect_cycles_total": int(sum(1 for c in cycle_summaries if c["perfect_on_current_val"])),
+            "final_vprime_min_class_count": int(vp_min_class_count),
+        },
         "cycles": len(cycle_summaries),
         "k_increases_total": total_k_increases,
         "vprime_expansions": n_expansions,
@@ -728,6 +924,35 @@ def run_phase_experiment(
             "val_ga_population_evaluations": int(
                 sum(
                     (c["val_ga"]["history_summary"].get("val_ga_population_evaluations") or 0)
+                    for c in cycle_summaries
+                )
+            ),
+            # --- rozbicie kosztu (faktyczne wiersze przekazane modelowi vs nominalne liczby Val-GA) ---
+            "selection_predict_rows": int(counter.get("selection_predict_rows", 0)),
+            "selection_decision_rows": int(counter.get("selection_decision_rows", 0)),
+            "diagnostic_scored_rows": int(counter.get("diagnostic_scored_rows", 0)),
+            "val_ga_nominal_subset_rows_scored": int(
+                sum(
+                    (c["val_ga"]["history_summary"].get("val_ga_nominal_subset_rows_scored") or 0)
+                    for c in cycle_summaries
+                )
+            ),
+            "vprime_candidates_total": int(
+                sum((c["val_ga"]["history_summary"].get("n_candidates") or 0) for c in cycle_summaries)
+            ),
+            "vprime_scored_pool_total": int(
+                sum((c["val_ga"]["history_summary"].get("n_scored_pool") or 0) for c in cycle_summaries)
+            ),
+            "vprime_increment_rows_total": int(sum(c["val_ga"]["adv_selected_rows"] for c in cycle_summaries)),
+            "train_ga_fit_rows": int(
+                sum(
+                    c["train_ga"]["history_summary"]["svm_evaluations"] * c["best_train"]["rows"]
+                    for c in cycle_summaries
+                )
+            ),
+            "train_ga_vprime_rows_scored": int(
+                sum(
+                    c["train_ga"]["history_summary"]["svm_evaluations"] * c["current_val"]["rows"]
                     for c in cycle_summaries
                 )
             ),

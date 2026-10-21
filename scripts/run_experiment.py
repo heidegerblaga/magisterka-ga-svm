@@ -28,6 +28,7 @@ from ga.loop.engine import (
 )
 from ga.models.svm import SVMConfig, evaluate_fitted_svm, train_eval_svm
 from ga.phase_engine import run_phase_experiment
+from ga.phase_switch import PHASE_SWITCH_COLUMNS, run_phase_switch_experiment
 from ga.reporting import HISTORY_TABLE_COLUMNS, build_report_row, load_datasets_from_config
 from ga.utils.artifacts import (
     append_csv_row,
@@ -87,6 +88,26 @@ CYCLE_TABLE_COLUMNS = [
     "train_ga_test_accuracy",
     "train_ga_full_validation_accuracy",
     "control_model_predictions_cum",
+    # --- reguła stopu BA(V')=1,0 (puste/domyślne dla przebiegów bez rozszerzonej reguły) ---
+    "min_vprime_per_class_required",
+    "min_vprime_size_required",
+    "vprime_min_class_count",
+    "min_vprime_size_reached",
+    "perfect_rechecks_required",
+    "perfect_rechecks_done",
+    "perfect_gate_pending",
+    "perfect_stop_blocked",
+    "perfect_stop_blocked_reason",
+    "stop_decision",
+    "stop_category",
+    # --- koszt doboru V' (faktyczne wiersze przekazane modelowi; Val-GA nominalnie osobno) ---
+    "vprime_candidates",
+    "vprime_scored_pool",
+    "vprime_increment_rows",
+    "selection_predict_rows",
+    "selection_decision_rows",
+    "val_ga_nominal_subset_rows_scored",
+    "diagnostic_scored_rows",
 ]
 
 
@@ -634,6 +655,20 @@ def main(config, artifacts_root):
             log,
             artifact_layout,
         )
+    elif mode == "dagasvm_phase_switch":
+        # automat T' <-> V' (followup_phase_switch); logika w ``ga.phase_switch``
+        mode_outputs = run_phase_switch_experiment(
+            X_train,
+            y_train,
+            X_val_full,
+            y_val_full,
+            X_test,
+            y_test,
+            svm_cfg,
+            cfg,
+            log,
+            artifact_layout,
+        )
     elif mode in {"dagasvm_valga", "dagasvm_phase"}:
         mode_outputs = run_dagasvm_phase_mode(
             X_train,
@@ -670,7 +705,11 @@ def main(config, artifacts_root):
         "sweep_id": cfg.get("sweep_id"),
         "trial_id": cfg.get("trial_id"),
         "trial_overrides": cfg.get("trial_overrides"),
-        "objective_metric_name": cfg.get("fitness", {}).get("metric", "balanced_accuracy"),
+        # w trybie dagasvm_phase_switch optymalizowana jest fitness.tprime_metric (domyślnie = fitness.metric)
+        "objective_metric_name": (
+            (cfg.get("fitness", {}).get("tprime_metric") if mode == "dagasvm_phase_switch" else None)
+            or cfg.get("fitness", {}).get("metric", "balanced_accuracy")
+        ),
         "run_root": str(run_root),
         "seed": cfg.get("seed", 42),
         "log_path": str(log_path),
@@ -702,7 +741,8 @@ def main(config, artifacts_root):
     )
 
     write_json(summary_path, experiment_summary)
-    write_csv_rows(cycles_path, mode_outputs["cycle_table_rows"], fieldnames=CYCLE_TABLE_COLUMNS)
+    cycle_columns = PHASE_SWITCH_COLUMNS if mode == "dagasvm_phase_switch" else CYCLE_TABLE_COLUMNS
+    write_csv_rows(cycles_path, mode_outputs["cycle_table_rows"], fieldnames=cycle_columns)
 
     global_best = mode_outputs["global_best"] or {}
     best_val_metric = (global_best.get("metrics_val") or {}).get("metric")

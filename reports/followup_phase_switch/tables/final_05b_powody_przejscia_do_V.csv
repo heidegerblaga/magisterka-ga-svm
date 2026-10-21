@@ -1,0 +1,8 @@
+dataset,bramka ρ_SV < TSV (bez zwiększenia K),limit K klasy (bez zwiększenia K),zastój: 3 zwiększenia K bez poprawy
+chessboard,14,0,117
+circles,30,0,260
+classification2d,29,0,268
+digits,0,6,22
+magic,0,33,186
+moons,17,0,177
+spiral,54,0,237

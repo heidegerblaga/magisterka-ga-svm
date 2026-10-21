@@ -1,0 +1,18 @@
+seria,rola,podział,zbiory,warianty,seedy,zaplanowane,ukończone (job),błędy (job),w toku,podsumowania
+short_moons,wcześniejsza wersja automatu (v1),2026,1,3,10,30,30,0,0,30
+smoke_all,wcześniejsza wersja automatu (v1),2026,5,2,2,20,20,0,0,20
+smoke_chess_f025_svgate,wcześniejsza wersja automatu (v1),2026,1,3,2,6,6,0,0,6
+smoke_chess_r1000,wcześniejsza wersja automatu (v1),2026,1,2,2,4,4,0,0,4
+smoke_chess_r1000_svgate,wcześniejsza wersja automatu (v1),2026,1,3,2,6,6,0,0,6
+smoke_moons_f005,wcześniejsza wersja automatu (v1),2026,1,3,3,9,9,0,0,9
+smoke_moons_f010,wcześniejsza wersja automatu (v1),2026,1,3,3,9,9,0,0,9
+smoke_moons_f010_svgate,wcześniejsza wersja automatu (v1),2026,1,3,3,9,9,0,0,9
+smoke_moons_f025,wcześniejsza wersja automatu (v1),2026,1,3,3,9,9,0,0,9
+smoke_moons_f025_svgate,wcześniejsza wersja automatu (v1),2026,1,3,3,9,9,0,0,9
+v2_full,główna,2026,7,3,20,420,420,0,0,420
+v2_smoke_chess_r1000,pilotaż,2026,1,3,2,6,6,0,0,6
+v2_smoke_chess_r1000_nogate,pilotaż,2026,1,3,2,6,6,0,0,7
+v2_smoke_moons,pilotaż,2026,1,3,3,9,9,0,0,9
+v2_split2027,główna,2027,6,3,5,90,90,0,0,90
+v2_split2028,główna,2028,6,3,5,90,90,0,0,90
+v2_split2029,główna,2029,6,3,5,90,90,0,0,90

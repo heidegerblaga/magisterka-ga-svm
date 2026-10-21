@@ -1,0 +1,59 @@
+study: followup_phase_switch
+version: v2
+algorithm_mode: dagasvm_phase_switch
+split: 2026
+phase_switch_defaults:
+  vprime_increment_per_class: 10
+  max_vprime_fraction: 0.25
+  max_vprime_rows: null
+  max_vprime_expansions: null
+  vprime_difficulty_metric: error_rate
+  vprime_difficulty_min_delta: 0.01
+  vprime_difficulty_patience: 2
+  vprime_difficulty_window: 2
+  vprime_min_difficulty: 0.0
+  max_vprime_expansions_per_phase: 10
+  max_no_improvement_k_increases: 3
+  fitness_min_delta: 0.0005
+  allow_one_vprime_retry_after_t_stall: true
+  retry_resolution: after_k_increases
+  retry_reference: same_vprime
+  k_growth_requires_sv_signal: true
+  warm_start_tprime: true
+  ga_stop_at_perfect: true
+  representative: best_on_final_vprime
+  max_cycles: 300
+variants:
+  evo_switch:
+    selection: evolutionary
+    memory: true
+    mode: growing
+    label: ewolucyjny dobór ΔV'
+  rand_switch:
+    selection: random
+    memory: true
+    mode: growing
+    label: losowy dobór ΔV', własny automat (te same reguły, własny harmonogram)
+  rand_replay:
+    selection: random
+    memory: true
+    mode: growing
+    label: losowy dobór ΔV', harmonogram (fazy, K, |ΔV'|) odtworzony z evo_switch
+replay_source:
+  rand_replay: evo_switch
+executed_series:
+  v2_smoke_chess_r1000:
+    phase_switch_overrides:
+      max_vprime_rows: 1000
+    datasets:
+    - chessboard
+  v2_smoke_chess_r1000_nogate:
+    phase_switch_overrides:
+      max_vprime_rows: 1000
+      k_growth_requires_sv_signal: false
+    datasets:
+    - chessboard
+  v2_smoke_moons:
+    phase_switch_overrides: {}
+    datasets:
+    - moons

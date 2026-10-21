@@ -1,0 +1,109 @@
+study: followup_phase_switch
+algorithm_mode: dagasvm_phase_switch
+split: 2026
+phase_switch_defaults:
+  vprime_increment_per_class: 10
+  max_vprime_fraction: 0.25
+  max_vprime_rows: null
+  vprime_difficulty_min_delta: 0.01
+  vprime_difficulty_patience: 2
+  vprime_difficulty_window: 2
+  vprime_min_difficulty: 0.0
+  max_vprime_expansions_per_phase: 10
+  max_no_improvement_k_increases: 3
+  fitness_min_delta: 0.0005
+  allow_one_vprime_retry_after_t_stall: true
+  k_growth_requires_sv_signal: true
+  warm_start_tprime: true
+  ga_stop_at_perfect: true
+  representative: best_on_final_vprime
+  max_cycles: 300
+variants:
+  evo_switch:
+    selection: evolutionary
+    memory: true
+    mode: growing
+    label: ewolucyjny dobór ΔV'
+  rand_switch:
+    selection: random
+    memory: true
+    mode: growing
+    label: losowy dobór ΔV', własny automat (te same reguły, własny harmonogram)
+  rand_replay:
+    selection: random
+    memory: true
+    mode: growing
+    label: losowy dobór ΔV', harmonogram (fazy, K, |ΔV'|) odtworzony z evo_switch
+  heur_switch:
+    selection: heuristic
+    memory: true
+    mode: growing
+    label: heurystyka błędów ΔV'
+replay_source:
+  rand_replay: evo_switch
+executed_series:
+  short_moons:
+    phase_switch_overrides: {}
+    datasets:
+    - moons
+  smoke_all:
+    phase_switch_overrides: {}
+    datasets:
+    - circles
+    - classification2d
+    - digits
+    - magic
+    - spiral
+  smoke_chess_f025_svgate:
+    phase_switch_overrides: {}
+    datasets:
+    - chessboard
+  smoke_chess_r1000:
+    phase_switch_overrides:
+      max_vprime_rows: 1000
+      k_growth_requires_sv_signal: false
+    datasets:
+    - chessboard
+    note: uruchomione przed zmianą wartości domyślnej k_growth_requires_sv_signal
+      na true (wartość zapisana jawnie)
+  smoke_chess_r1000_svgate:
+    phase_switch_overrides:
+      max_vprime_rows: 1000
+    datasets:
+    - chessboard
+  smoke_moons_f005:
+    phase_switch_overrides:
+      max_vprime_fraction: 0.05
+      k_growth_requires_sv_signal: false
+    datasets:
+    - moons
+    note: uruchomione przed zmianą wartości domyślnej k_growth_requires_sv_signal
+      na true (wartość zapisana jawnie)
+  smoke_moons_f010:
+    phase_switch_overrides:
+      max_vprime_fraction: 0.1
+      k_growth_requires_sv_signal: false
+    datasets:
+    - moons
+    note: uruchomione przed zmianą wartości domyślnej k_growth_requires_sv_signal
+      na true (wartość zapisana jawnie)
+  smoke_moons_f010_svgate:
+    phase_switch_overrides:
+      max_vprime_fraction: 0.1
+      k_growth_requires_sv_signal: true
+    datasets:
+    - moons
+  smoke_moons_f025:
+    phase_switch_overrides:
+      max_vprime_fraction: 0.25
+      k_growth_requires_sv_signal: false
+    datasets:
+    - moons
+    note: uruchomione przed zmianą wartości domyślnej k_growth_requires_sv_signal
+      na true (wartość zapisana jawnie)
+  smoke_moons_f025_svgate:
+    phase_switch_overrides:
+      max_vprime_fraction: 0.25
+      k_growth_requires_sv_signal: true
+    datasets:
+    - moons

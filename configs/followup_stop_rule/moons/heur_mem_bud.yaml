@@ -1,0 +1,68 @@
+seed: 42
+experiment_name: followup_stop_rule_s2026_moons_heur_mem_bud_seed42
+dataset_name: Moons
+algorithm_mode: dagasvm_phase
+artifacts_root: artifacts/followup_stop_rule/split_2026/moons/heur_mem_bud
+data:
+  train_csv: data/followup_stop_rule/split_2026/moons/train.csv
+  validation_csv: data/followup_stop_rule/split_2026/moons/validation.csv
+  test_csv: data/followup_stop_rule/split_2026/moons/test.csv
+  target: label
+  stratify: true
+  header: true
+  target_candidates:
+  - target
+  - y
+  - class
+  max_rows: 0
+svm:
+  kernel: rbf
+  C: 1.0
+  gamma: 2.0
+  class_weight: balanced
+  probability: false
+  standardize: false
+fitness:
+  metric: balanced_accuracy
+  class_imbalance_penalty: 0.0
+ga:
+  population_size: 30
+  generations: 30
+  tournament_k: 3
+  crossover_rate: 0.8
+  mutation_rate: 0.05
+  elitism: 2
+  early_stopping:
+    patience: 3
+    min_delta: 0.0001
+daga:
+  k_start: 10
+  TSV: 0.25
+  Ts: 3
+  phase_min_delta: 0.0005
+  sv_ratio_stability_epsilon: 0.02
+  sv_ratio_saturation_margin: 0.15
+  min_vprime_per_class: 50
+  perfect_recheck_expansions: 1
+  perfect_recheck_min_add_per_class: 50
+vprime:
+  selection: heuristic
+  memory: true
+  mode: growing
+  pool_budget_factor: 10.0
+val_ga:
+  population_size: 30
+  generations: 20
+  tournament_k: 3
+  crossover_rate: 0.8
+  mutation_rate: 0.1
+  elitism: 2
+observation:
+  full_validation: true
+  test: true
+followup:
+  study: followup_stop_rule
+  split_seed: 2026
+  dataset: moons
+  variant: heur_mem_bud
+  stop_rule: extended

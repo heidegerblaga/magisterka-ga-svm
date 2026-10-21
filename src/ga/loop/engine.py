@@ -292,8 +292,15 @@ def run_ga_k_per_class_with_trace(
     fcfg: FitnessConfig,
     gcfg: GAConfig,
     seed: int = 42,
+    seed_masks: list[np.ndarray] | None = None,
+    target_fitness: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[dict], np.ndarray]:
-    """Wariant GASVM: zwraca też trace per generacja + najlepsze maski w generacjach."""
+    """Wariant GASVM: zwraca też trace per generacja + najlepsze maski w generacjach.
+
+    ``seed_masks`` (opcjonalnie): maski (dokładnie k/klasę) wstawiane na początek populacji startowej
+    (warm start T'); ``target_fitness`` (opcjonalnie): GA kończy się, gdy najlepszy fitness osiągnie tę wartość.
+    Przy wartościach domyślnych (None) przebieg jest identyczny z historycznym.
+    """
     rng = np.random.default_rng(seed)
 
     pop = np.stack(
@@ -306,6 +313,8 @@ def run_ga_k_per_class_with_trace(
         ],
         axis=0,
     )
+    for i, mask in enumerate((seed_masks or [])[: gcfg.population_size]):
+        pop[i] = np.asarray(mask, dtype=bool)
     scores, metas = _evaluate_population_k(
         pop, X_pool, y_pool, X_val, y_val, svm_cfg, fcfg, return_meta=True
     )
@@ -324,7 +333,8 @@ def run_ga_k_per_class_with_trace(
         sv_count = int(meta.get("num_support_vectors", 0) or 0)
         return None if training_rows <= 0 else float(sv_count / training_rows)
 
-    for gen in range(gcfg.generations):
+    reached = target_fitness is not None and best_score >= target_fitness
+    for gen in range(0 if reached else gcfg.generations):
         new_pop = []
         elite_idx = np.argsort(scores)[-gcfg.elitism:]
         for ei in elite_idx:
@@ -376,6 +386,8 @@ def run_ga_k_per_class_with_trace(
             best_score = gen_best
             best_mask = pop[gen_best_idx].copy()
             no_improve = 0
+            if target_fitness is not None and best_score >= target_fitness:
+                break
         else:
             no_improve += 1
             if gcfg.early_stopping.patience and no_improve >= gcfg.early_stopping.patience:

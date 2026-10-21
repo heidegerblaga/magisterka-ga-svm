@@ -64,6 +64,11 @@ def algorithm_metadata(mode: str) -> dict[str, str]:
             "training_set_selection": "Yes",
             "validation_set_selection": "Yes",
         },
+        "dagasvm_phase_switch": {
+            "algorithm": "DAGASVM (T'/V' phase switch)",
+            "training_set_selection": "Yes",
+            "validation_set_selection": "Yes",
+        },
     }
     return mapping.get(mode, mapping["dagasvm"])
 
@@ -146,7 +151,7 @@ def load_datasets_from_config(cfg: dict[str, Any], apply_limit: bool = True) -> 
 
 def infer_algorithm_mode(summary: dict[str, Any], cfg: dict[str, Any] | None = None) -> str:
     for candidate in (summary.get("algorithm_mode"), (cfg or {}).get("algorithm_mode")):
-        if candidate in {"full_svm", "gasvm", "dagasvm", "dagasvm_valga", "dagasvm_phase"}:
+        if candidate in {"full_svm", "gasvm", "dagasvm", "dagasvm_valga", "dagasvm_phase", "dagasvm_phase_switch"}:
             return str(candidate)
 
     cycles = summary.get("cycles") or []
@@ -218,7 +223,7 @@ def _representative_train_mask_path(
         return _resolve_artifact_path(summary_path, stored_path) if summary_path else Path(stored_path)
 
     cycles = summary.get("cycles") or []
-    if mode in {"gasvm", "dagasvm", "dagasvm_valga", "dagasvm_phase"} and cycles:
+    if mode in {"gasvm", "dagasvm", "dagasvm_valga", "dagasvm_phase", "dagasvm_phase_switch"} and cycles:
         cycle_index = max(0, int((global_best.get("cycle") or 1) - 1))
         cycle = cycles[min(cycle_index, len(cycles) - 1)]
         stored_path = ((cycle.get("train_ga") or {}).get("best_train_mask_path"))
@@ -237,7 +242,7 @@ def _representative_validation_size(
     if validation_size is not None:
         return int(validation_size)
 
-    if mode in {"dagasvm_valga", "dagasvm_phase"}:
+    if mode in {"dagasvm_valga", "dagasvm_phase", "dagasvm_phase_switch"}:
         global_best = summary.get("global_best") or {}
         best_cycle = int(global_best.get("cycle") or 1)
         for cycle in summary.get("cycles") or []:
@@ -262,7 +267,7 @@ def _representative_training_size(summary: dict[str, Any], mode: str, default_ro
     if rep.get("training_rows") is not None:
         return int(rep["training_rows"])
 
-    if mode in {"gasvm", "dagasvm", "dagasvm_valga", "dagasvm_phase"}:
+    if mode in {"gasvm", "dagasvm", "dagasvm_valga", "dagasvm_phase", "dagasvm_phase_switch"}:
         global_best = summary.get("global_best") or {}
         train_summary = global_best.get("train_summary") or {}
         if train_summary.get("rows") is not None:
@@ -304,7 +309,7 @@ def build_report_row(
     # raportu (a z niego ranking sweepa) liczył metryki SVM wytrenowanego na CAŁYM zbiorze
     # treningowym zamiast na reprezentatywnym T'. Efekt: stałe, niewiarygodne wartości
     # (np. identyczna liczba SV i F1 we wszystkich seedach).
-    if mode in {"gasvm", "dagasvm", "dagasvm_valga", "dagasvm_phase"}:
+    if mode in {"gasvm", "dagasvm", "dagasvm_valga", "dagasvm_phase", "dagasvm_phase_switch"}:
         if train_mask_path is None or not train_mask_path.exists():
             raise FileNotFoundError(f"Nie znaleziono maski treningowej dla summary: {summary_path}")
         train_mask = np.load(train_mask_path)

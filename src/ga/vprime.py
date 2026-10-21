@@ -21,6 +21,8 @@ import numpy as np
 from ga.loop.engine import GAConfig, ValEncodingConfig, run_val_ga
 
 SELECTION_STRATEGIES = ("heuristic", "evolutionary", "random")
+# liczniki kosztu doboru V' (wiersze faktycznie przekazane do modelu); nominalne wartości Val-GA są osobno w diagnostyce
+_COST_KEYS = ("selection_predict_rows", "selection_decision_rows", "diagnostic_scored_rows")
 VPRIME_MODES = ("growing", "fixed")
 
 
@@ -39,6 +41,10 @@ class VPrimeConfig:
                 (poprzednie elementy są odrzucane; harmonogram rozmiaru jak przy memory=True).
     mode: ``growing`` (V' rozszerzane w kolejnych cyklach) albo ``fixed`` (V' wylosowane
           raz na starcie o rozmiarze ``fixed_size`` i potem nie zmieniane — wariant bazowy).
+    pool_budget_factor: opcjonalny, WSPÓLNY dla wszystkich strategii limit budżetu doboru. Przy każdym
+          rozszerzeniu strategia widzi tylko losową (stratyfikowaną klasowo) podpulę kandydatów o rozmiarze
+          co najwyżej ``pool_budget_factor × (liczba wybieranych elementów)``; podpula nie zależy od
+          strategii ani od modelu. ``None`` (domyślnie) = brak limitu = zachowanie historyczne.
     """
 
     selection: str = "heuristic"
@@ -46,8 +52,11 @@ class VPrimeConfig:
     mode: str = "growing"
     fixed_size: int | None = None
     score_candidate_pool: bool = True  # diagnostyka: błędność całej puli (nie steruje algorytmem)
+    pool_budget_factor: float | None = None
 
     def __post_init__(self) -> None:
+        if self.pool_budget_factor is not None and float(self.pool_budget_factor) < 1.0:
+            raise ValueError("vprime.pool_budget_factor musi wynosić co najmniej 1 (pula >= liczba wybieranych elementów).")
         if self.selection not in SELECTION_STRATEGIES:
             raise ValueError(
                 f"Nieznana strategia doboru V': {self.selection!r}; oczekiwano jednej z {SELECTION_STRATEGIES}."
@@ -144,6 +153,18 @@ def stratified_random_ids(y: np.ndarray, n: int, rng: np.random.Generator) -> np
     return np.sort(np.concatenate(picked)).astype(np.int64)
 
 
+def budget_pool_ids(candidate_ids: np.ndarray, y_cand: np.ndarray, size: int, rng: np.random.Generator) -> np.ndarray:
+    """Losowa podpula kandydatów o rozmiarze ``size`` z zachowaniem proporcji klas (budżet doboru V').
+
+    Wynik zależy wyłącznie od etykiet i generatora ``rng`` — nigdy od modelu ani od strategii doboru.
+    """
+    candidate_ids = np.asarray(candidate_ids, dtype=np.int64)
+    if size >= candidate_ids.size:
+        return candidate_ids
+    local = stratified_random_ids(np.asarray(y_cand), int(size), rng)
+    return candidate_ids[local].astype(np.int64)
+
+
 def _decision_margin_abs(clf, X: np.ndarray) -> np.ndarray:
     try:
         margin = clf.decision_function(X)
@@ -166,8 +187,13 @@ def _select_heuristic(X_cand, y_cand, candidate_ids, clf, per_class, counter) ->
     selected_local: list[np.ndarray] = []
     pred = clf.predict(X_cand)
     counter["model_predictions"] += int(len(candidate_ids))
+    counter["selection_predict_rows"] = counter.get("selection_predict_rows", 0) + int(len(candidate_ids))
     incorrect = pred != y_cand
     margins = _decision_margin_abs(clf, X_cand)
+    # drugie, osobne przejście modelu po całej puli (decision_function); fallback bez wywołania modelu
+    # liczymy tylko wtedy, gdy model faktycznie udostępnia decision_function
+    if hasattr(clf, "decision_function"):
+        counter["selection_decision_rows"] = counter.get("selection_decision_rows", 0) + int(len(candidate_ids))
     for cls in np.unique(y_cand):
         cls_local_idx = np.flatnonzero(y_cand == cls)
         if cls_local_idx.size == 0:
@@ -196,6 +222,7 @@ def _select_evolutionary(
     # Model jest ustalony na czas Val-GA, więc predykcje liczymy raz dla puli (wynik identyczny).
     pool_pred = clf.predict(X_cand)
     counter["model_predictions"] += n_candidates
+    counter["selection_predict_rows"] = counter.get("selection_predict_rows", 0) + n_candidates
     history_adv, best_mask = run_val_ga(
         X_cand,
         y_cand,
@@ -288,11 +315,18 @@ def expand_vprime(
     rng: np.random.Generator,
     counter: dict,
     score_candidate_pool: bool = True,
+    pool_budget_factor: float | None = None,
 ) -> ExpansionResult:
-    """Rozszerza (memory=True) albo regeneruje (memory=False) V' i pilnuje spójności identyfikatorów."""
+    """Rozszerza (memory=True) albo regeneruje (memory=False) V' i pilnuje spójności identyfikatorów.
+
+    ``pool_budget_factor`` (opcjonalnie): wspólny dla wszystkich strategii limit budżetu — strategia wybiera
+    wyłącznie z losowej, stratyfikowanej klasowo podpuli o rozmiarze <= czynnik × liczba wybieranych elementów.
+    Podpula jest losowana generatorem zależnym tylko od ``seed`` (nie od strategii, modelu ani ``rng``).
+    """
     before_ids = vset.ids
     size_before = vset.size
     candidates = vset.candidates()
+    cost_before = {k: int(counter.get(k, 0)) for k in _COST_KEYS}
 
     if memory:
         n_select = int(n_add)
@@ -302,11 +336,18 @@ def expand_vprime(
         n_select = min(size_before + int(n_add), int(candidates.size))
         per_class = int(np.ceil((size_before + int(n_add)) / max(1, n_classes)))
 
+    pool_ids = candidates
+    if pool_budget_factor is not None and n_select > 0 and candidates.size:
+        cap = int(np.ceil(float(pool_budget_factor) * int(n_select)))
+        if cap < candidates.size:
+            pool_rng = np.random.default_rng(np.random.SeedSequence([int(seed), 303]))
+            pool_ids = budget_pool_ids(candidates, y_val[candidates], cap, pool_rng)
+
     result = select_new_ids(
         strategy,
         X_val=X_val,
         y_val=y_val,
-        candidate_ids=candidates,
+        candidate_ids=pool_ids,
         clf=clf,
         n_select=n_select,
         per_class=per_class,
@@ -323,7 +364,9 @@ def expand_vprime(
             "selection_strategy": strategy,
             "memory": bool(memory),
             "n_candidates": int(candidates.size),
+            "n_scored_pool": int(pool_ids.size),
             "n_select_target": int(n_select),
+            "pool_budget_factor": None if pool_budget_factor is None else float(pool_budget_factor),
         }
     )
 
@@ -357,11 +400,20 @@ def expand_vprime(
         diagnostics.update(
             {"selected_rows": 0, "selected_errors": 0, "selected_error_rate": None, "selected_mean_abs_margin": None}
         )
-    if score_candidate_pool and diagnostics.get("candidate_pool_error_rate") is None and candidates.size:
-        pool_pred = clf.predict(X_val[candidates])
-        diagnostics["candidate_pool_error_rate"] = float((pool_pred != y_val[candidates]).mean())
-        diagnostics["candidate_pool_errors_available"] = int((pool_pred != y_val[candidates]).sum())
-        counter["diagnostic_predictions"] = counter.get("diagnostic_predictions", 0) + int(candidates.size)
+    if selected.size:
+        # diagnostyka przyrostu: predict + decision_function na wybranych wierszach
+        counter["diagnostic_scored_rows"] = counter.get("diagnostic_scored_rows", 0) + 2 * int(selected.size)
+    if score_candidate_pool and diagnostics.get("candidate_pool_error_rate") is None and pool_ids.size:
+        pool_pred = clf.predict(X_val[pool_ids])
+        diagnostics["candidate_pool_error_rate"] = float((pool_pred != y_val[pool_ids]).mean())
+        diagnostics["candidate_pool_errors_available"] = int((pool_pred != y_val[pool_ids]).sum())
+        counter["diagnostic_predictions"] = counter.get("diagnostic_predictions", 0) + int(pool_ids.size)
+        counter["diagnostic_scored_rows"] = counter.get("diagnostic_scored_rows", 0) + int(pool_ids.size)
+
+    # --- koszt tego rozszerzenia (faktyczne wiersze przekazane do modelu vs nominalne wartości Val-GA) ---
+    diagnostics["cost_selection_predict_rows"] = int(counter.get("selection_predict_rows", 0)) - cost_before["selection_predict_rows"]
+    diagnostics["cost_selection_decision_rows"] = int(counter.get("selection_decision_rows", 0)) - cost_before["selection_decision_rows"]
+    diagnostics["cost_diagnostic_scored_rows"] = int(counter.get("diagnostic_scored_rows", 0)) - cost_before["diagnostic_scored_rows"]
 
     return ExpansionResult(
         selected_ids=selected,
