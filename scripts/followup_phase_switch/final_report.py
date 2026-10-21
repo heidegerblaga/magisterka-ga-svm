@@ -701,18 +701,6 @@ reports/followup_phase_switch/tables/final_*.csv       # tabele wynikowe
 reports/followup_phase_switch/figures/                 # wykresy
 artifacts/followup_phase_switch/v2_*                   # przebiegi (summary.json, cycles.csv, konfiguracje)""")
 
-    # ============================ 12. USTNA ============================
-    rep.h1("12. Krótka wersja ustna dla rozmowy z promotorem")
-    rep.box(
-        "„Przebudowałem DAGASVM na jawny automat dwóch faz. Osiągnięcie BA(V′) = 1 nie kończy już algorytmu, tylko przełącza do fazy rozszerzania V′, a po rozszerzeniu wracamy do optymalizacji T′ na całym skumulowanym V′. "
-        f"Uruchomiłem {n_main} przebiegów na siedmiu zbiorach i czterech podziałach danych, wszystkie ukończone, i sprawdziłem na wszystkich cyklach, że automat zachowuje się zgodnie z Pana uwagami; główne odstępstwo to bramka ρ<sub>SV</sub>, która w niewielu przypadkach przełącza do V′ bez zwiększenia K. "
-        f"V′ przestało rosnąć do nadmiernych rozmiarów: na Szachownicy mamy około {fint(chess_new['V′ średnio'])} próbek zamiast {fint(chess_old['V′ średnio'])}, przy tej samej jakości testowej. "
-        f"Ewolucja rzeczywiście wybiera dużo trudniejsze próbki, bo model myli się na nich {fnum(err_ratio.min(), 1)}–{fnum(err_ratio.max(), 1)} razy częściej niż na losowych. "
-        "Nie przekłada się to jednak na lepszy model: różnice BA na teście są poniżej pół punktu procentowego, a istotna statystycznie jest tylko mała różnica na Szachownicy, która nie utrzymuje się w innych metrykach. "
-        f"Ewolucja jest przy tym droższa, bo potrzebuje od {fnum((r_svm[0] - 1) * 100, 0)} do {fnum((r_svm[1] - 1) * 100, 0)} procent więcej treningów SVM. "
-        "Najważniejszy problem to to, że rozmiar V′ i moment zakończenia wynikają głównie z reguł automatu — stałej długości fazy V′ i bramki ρ<sub>SV</sub> — a nie z sygnału jakościowego. "
-        "Ścieżka z BA równym jeden praktycznie dotyczy tylko początkowego V′. "
-        "Proszę o decyzję w sprawie bramki ρ<sub>SV</sub> i progu opanowania, a następnie proponuję porównać ewolucję z losowaniem na stałej siatce małych rozmiarów V′ oraz porównać BA z F1 i AUC jako fitness.”")
     rep.build()
 
 
